@@ -23,10 +23,8 @@
 namespace aliceVision {
 
 template <class T>
-class StaticVector
+class StaticVector : public std::vector<T>
 {
-    std::vector<T> _data;
-
     typedef typename std::vector<T>::iterator Iterator;
     typedef typename std::vector<T>::const_iterator ConstIterator;
     typedef typename std::vector<T>::reference Reference;
@@ -37,54 +35,21 @@ public:
     {}
 
     StaticVector( int n )
-        : _data( n )
+        : std::vector<T>(n)
     {}
 
     StaticVector( int n, const T& value )
-        : _data( n, value )
+        : std::vector<T>(n,value)
     {}
 
-    const T& operator[](int index) const
-    {
-        return _data[index];
-    }
-
-    T& operator[](int index)
-    {
-        return _data[index];
-    }
-
-    void clear() { _data.clear(); }
-
-    Iterator begin() { return _data.begin(); }
-    Iterator end() { return _data.end(); }
-
-    ConstIterator begin() const { return _data.begin(); }
-    ConstIterator end() const { return _data.end(); }
-
-    Reference front() { return _data.front(); }
-    ConstReference front() const { return _data.front(); }
-
-    const std::vector<T>& getData() const { return _data; }
-    std::vector<T>& getDataWritable() { return _data; }
-    int size() const { return _data.size(); }
-    bool empty() const { return _data.empty(); }
-    size_t capacity() const { return _data.capacity(); }
-    void reserve(int n) { _data.reserve(n); }
-    void resize(int n) { _data.resize(n); }
-    void resize(int n, T value) { _data.resize(n, value); }
-    void resize_with(int n, const T& val) { _data.resize(n, val); }
-    void swap( StaticVector& other ) { _data.swap(other._data); }
-    void assign(int n, T value) { _data.assign(n, value); }
-
-    void shrink_to_fit()
-    {
-        _data.shrink_to_fit();
-    }
+    const std::vector<T>& getData() const { return *this; }
+    std::vector<T>& getDataWritable() { return *this; }
+    void resize_with(int n, const T& val) { this->resize(n, val); }
+    void swap( StaticVector& other ) { std::vector<T>::swap(other); }
 
     void reserveAddIfNeeded(int nplanned, int ntoallocated)
     {
-        if(size() + nplanned > capacity())
+        if(this->size() + nplanned > this->capacity())
         {
             reserveAdd(nplanned + ntoallocated);
         }
@@ -92,48 +57,43 @@ public:
 
     void reserveAdd(int ntoallocated)
     {
-        _data.reserve(capacity() + ntoallocated);
-    }
-
-    void push_back(const T& val)
-    {
-        _data.push_back(val);
+        this->reserve(this->capacity() + ntoallocated);
     }
 
     void push_front(const T& val)
     {
-        _data.insert(_data.begin(), val);
+        this->insert(this->begin(), val);
     }
 
     void push_back_arr(StaticVector<T>* arr)
     {
-        _data.insert(_data.end(), arr->getData().begin(), arr->getData().end());
+        this->insert(this->end(), arr->getData().begin(), arr->getData().end());
     }
 
     void remove(int i)
     {
-        _data.erase(_data.begin() + i);
+        this->erase(this->begin() + i);
     }
 
     int push_back_distinct(const T& val)
     {
         int id = indexOf(val);
         if(id == -1)
-            _data.push_back(val);
+            this->push_back(val);
         return id;
     }
 
     T pop()
     {
-        T val = _data.back();
-        _data.pop_back();
+        T val = this->back();
+        this->pop_back();
         return val;
     }
 
     int indexOf(const T& value) const
     {
-        const auto it = std::find(_data.begin(), _data.end(), value);
-        return it != _data.end() ? std::distance(_data.begin(), it) : -1;
+        const auto it = std::find(this->begin(), this->end(), value);
+        return it != this->end() ? std::distance(this->begin(), it) : -1;
     }
 
     int indexOfSorted(const T& value) const
@@ -144,31 +104,31 @@ public:
     int indexOfNearestSorted(const T& value) const
     {
         // Retrieve the first element >= value in _data
-        auto it = std::lower_bound(_data.begin(), _data.end(), value);
-        if(it == _data.end())
+        auto it = std::lower_bound(this->begin(), this->end(), value);
+        if(it == this->end())
             return -1;
         // If we're between two values...
-        if(it != _data.begin())
+        if(it != this->begin())
         {
             // ...select the index of the closest value between it (>= value) and prevIt (< value)
             auto prevIt = std::prev(it);
             it = (value - *prevIt) < (*it - value) ? prevIt : it;
         }
-        return std::distance(_data.begin(), it);
+        return std::distance(this->begin(), it);
     }
 
     int minValId() const
     {
-        if(_data.empty())
+        if(this->empty())
             return -1;
-        return std::distance(_data.begin(), std::min_element(_data.begin(), _data.end()));
+        return std::distance(this->begin(), std::min_element(this->begin(), this->end()));
     }
 
     int maxValId() const
     {
-        if (_data.empty())
+        if (this->empty())
             return -1;
-        return std::distance(_data.begin(), std::max_element(_data.begin(), _data.end()));
+        return std::distance(this->begin(), std::max_element(this->begin(), this->end()));
     }
 };
 
