@@ -9,10 +9,8 @@
 #include <aliceVision/mvsData/Matrix3x3.hpp>
 #include <aliceVision/mvsData/Matrix3x4.hpp>
 #include <aliceVision/mvsData/OrientedPoint.hpp>
-#include <aliceVision/mvsData/SeedPoint.hpp>
 #include <aliceVision/mvsUtils/common.hpp>
 #include <aliceVision/mvsUtils/fileIO.hpp>
-#include <aliceVision/depthMap/cuda/commonStructures.hpp>
 #include <aliceVision/depthMap/cuda/planeSweeping/plane_sweeping_cuda.hpp>
 #include <aliceVision/depthMap/cuda/planeSweeping/host_utils.h>
 
@@ -139,8 +137,7 @@ void cps_fillCameraData(mvsUtils::ImagesCache* ic, cameraStruct* cam, int c, mvs
     //	cam->tex_hmh_g->getBuffer(),
     //	cam->tex_hmh_b->getBuffer(), mp->indexes[c], mp, true, 1, 0);
 
-    // ic.refreshData(c);
-    mvsUtils::ImagesCache::ImgPtr img = ic->getImg( c );
+    mvsUtils::ImagesCache::ImgPtr img = ic->getImg_sync(c);
 
     Pixel pix;
     {
@@ -148,8 +145,8 @@ void cps_fillCameraData(mvsUtils::ImagesCache* ic, cameraStruct* cam, int c, mvs
         {
             for(pix.x = 0; pix.x < mp->getWidth(c); pix.x++)
             {
-                uchar4& pix_rgba = ic->transposed ? (*cam->tex_rgba_hmh)(pix.x, pix.y) : (*cam->tex_rgba_hmh)(pix.y, pix.x);
-                const uchar4 pc = get( img, pix.x, pix.y ); //  ic.getPixelValue(pix, c);
+                uchar4& pix_rgba = (*cam->tex_rgba_hmh)(pix.x, pix.y);
+                const uchar4 pc = get( img, pix.x, pix.y );
                 pix_rgba = pc;
             }
         }
@@ -172,7 +169,6 @@ void cps_updateCamH(cameraStruct* cam, float** H)
 PlaneSweepingCuda::PlaneSweepingCuda( int CUDADeviceNo,
                                       mvsUtils::ImagesCache&     ic,
                                       mvsUtils::MultiViewParams* _mp,
-                                      mvsUtils::PreMatchCams*    _pc,
                                       int scales )
     : _scales( scales )
     , _nbest( 1 ) // TODO remove nbest ... now must be 1
@@ -184,7 +180,6 @@ PlaneSweepingCuda::PlaneSweepingCuda( int CUDADeviceNo,
 {
 
     mp = _mp;
-    pc = _pc;
 
     const int maxImageWidth = mp->getMaxImageWidth();
     const int maxImageHeight = mp->getMaxImageHeight();
@@ -198,13 +193,13 @@ PlaneSweepingCuda::PlaneSweepingCuda( int CUDADeviceNo,
     _nImgsInGPUAtTime = (int)(maxmbGPU / oneimagemb);
     _nImgsInGPUAtTime = std::max(2, std::min(mp->ncams, _nImgsInGPUAtTime));
 
-    doVizualizePartialDepthMaps = mp->_ini.get<bool>("grow.visualizePartialDepthMaps", false);
-    useRcDepthsOrRcTcDepths = mp->_ini.get<bool>("grow.useRcDepthsOrRcTcDepths", false);
+    doVizualizePartialDepthMaps = mp->userParams.get<bool>("grow.visualizePartialDepthMaps", false);
+    useRcDepthsOrRcTcDepths = mp->userParams.get<bool>("grow.useRcDepthsOrRcTcDepths", false);
 
-    minSegSize = mp->_ini.get<int>("fuse.minSegSize", 100);
-    varianceWSH = mp->_ini.get<int>("global.varianceWSH", 4);
+    minSegSize = mp->userParams.get<int>("fuse.minSegSize", 100);
+    varianceWSH = mp->userParams.get<int>("global.varianceWSH", 4);
 
-    subPixel = mp->_ini.get<bool>("global.subPixel", true);
+    subPixel = mp->userParams.get<bool>("global.subPixel", true);
 
     ALICEVISION_LOG_INFO("PlaneSweepingCuda:" << std::endl
                          << "\t- _nImgsInGPUAtTime: " << _nImgsInGPUAtTime << std::endl
@@ -215,61 +210,54 @@ PlaneSweepingCuda::PlaneSweepingCuda( int CUDADeviceNo,
     // allocate global on the device
     ps_deviceAllocate((CudaArray<uchar4, 2>***)&ps_texs_arr, _nImgsInGPUAtTime, maxImageWidth, maxImageHeight, scales, _CUDADeviceNo);
 
-    cams = new StaticVector<void*>();
-    cams->reserve(_nImgsInGPUAtTime);
+    cams = new StaticVector<cameraStruct*>();
     cams->resize(_nImgsInGPUAtTime);
     camsRcs = new StaticVector<int>();
-    camsRcs->reserve(_nImgsInGPUAtTime);
     camsRcs->resize(_nImgsInGPUAtTime);
     camsTimes = new StaticVector<long>();
-    camsTimes->reserve(_nImgsInGPUAtTime);
     camsTimes->resize(_nImgsInGPUAtTime);
 
     for(int rc = 0; rc < _nImgsInGPUAtTime; ++rc)
     {
         (*cams)[rc] = new cameraStruct();
-        ((cameraStruct*)(*cams)[rc])->tex_rgba_hmh =
-            new CudaHostMemoryHeap<uchar4, 2>(CudaSize<2>(maxImageWidth, maxImageHeight));
-
-        ((cameraStruct*)(*cams)[rc])->H = NULL;
-        cps_fillCamera((cameraStruct*)(*cams)[rc], rc, mp, NULL, 1);
-        cps_fillCameraData(&ic, (cameraStruct*)(*cams)[rc], rc, mp);
-        (*camsRcs)[rc] = rc;
+        (*camsRcs)[rc] = -1;
         (*camsTimes)[rc] = clock();
-        ps_deviceUpdateCam((CudaArray<uchar4, 2>**)ps_texs_arr, (cameraStruct*)(*cams)[rc], rc, _CUDADeviceNo,
-                           _nImgsInGPUAtTime, scales, maxImageWidth, maxImageHeight, varianceWSH);
     }
 }
 
-int PlaneSweepingCuda::addCam(int rc, float** H, int scale)
+int PlaneSweepingCuda::addCam(int camIndex, float** H, int scale)
 {
-    // fist is oldest
-    int id = camsRcs->indexOf(rc);
+    // first is oldest
+    int id = camsRcs->indexOf(camIndex);
     if(id == -1)
     {
         // get oldest id
         int oldestId = camsTimes->minValId();
+        cameraStruct* cam = (*cams)[oldestId];
 
         long t1 = clock();
 
-        cps_fillCamera((cameraStruct*)(*cams)[oldestId], rc, mp, H, scale);
-        cps_fillCameraData(&_ic, (cameraStruct*)(*cams)[oldestId], rc, mp);
-        ps_deviceUpdateCam((CudaArray<uchar4, 2>**)ps_texs_arr, (cameraStruct*)(*cams)[oldestId], oldestId,
+        cps_fillCamera(cam, camIndex, mp, H, scale);
+
+        if(cam->tex_rgba_hmh == nullptr)
+        {
+            cam->tex_rgba_hmh =
+                new CudaHostMemoryHeap<uchar4, 2>(CudaSize<2>(mp->getMaxImageWidth(), mp->getMaxImageHeight()));
+        }
+        cps_fillCameraData(&_ic, cam, camIndex, mp);
+        ps_deviceUpdateCam((CudaArray<uchar4, 2>**)ps_texs_arr, cam, oldestId,
                            _CUDADeviceNo, _nImgsInGPUAtTime, _scales, mp->getMaxImageWidth(), mp->getMaxImageHeight(), varianceWSH);
 
         if(_verbose)
             mvsUtils::printfElapsedTime(t1, "copy image from disk to GPU ");
 
-        (*camsRcs)[oldestId] = rc;
+        (*camsRcs)[oldestId] = camIndex;
         (*camsTimes)[oldestId] = clock();
         id = oldestId;
     }
     else
     {
-
-        cps_fillCamera((cameraStruct*)(*cams)[id], rc, mp, H, scale);
-        // cps_fillCameraData((cameraStruct*)(*cams)[id], rc, mp, H, scales);
-        // ps_deviceUpdateCam((cameraStruct*)(*cams)[id], id, scales);
+        cps_fillCamera((cameraStruct*)(*cams)[id], camIndex, mp, H, scale);
 
         (*camsTimes)[id] = clock();
         cps_updateCamH((cameraStruct*)(*cams)[id], H);
@@ -302,63 +290,32 @@ PlaneSweepingCuda::~PlaneSweepingCuda(void)
 void PlaneSweepingCuda::getMinMaxdepths(int rc, const StaticVector<int>& tcams, float& minDepth, float& midDepth,
                                           float& maxDepth)
 {
-    StaticVector<SeedPoint>* seeds;
-    mvsUtils::loadSeedsFromFile(&seeds, rc, mp, mvsUtils::EFileType::seeds);
+  const bool minMaxDepthDontUseSeeds = mp->userParams.get<bool>("prematching.minMaxDepthDontUseSeeds", false);
+  const float maxDepthScale = static_cast<float>(mp->userParams.get<double>("prematching.maxDepthScale", 1.5f));
 
-    float minCamDist = (float)mp->_ini.get<double>("prematching.minCamDist", 0.0f);
-    float maxCamDist = (float)mp->_ini.get<double>("prematching.maxCamDist", 15.0f);
-    float maxDepthScale = (float)mp->_ini.get<double>("prematching.maxDepthScale", 1.5f);
-    bool minMaxDepthDontUseSeeds = mp->_ini.get<bool>("prematching.minMaxDepthDontUseSeeds", false);
+  if(minMaxDepthDontUseSeeds)
+  {
+    const float minCamDist = static_cast<float>(mp->userParams.get<double>("prematching.minCamDist", 0.0f));
+    const float maxCamDist = static_cast<float>(mp->userParams.get<double>("prematching.maxCamDist", 15.0f));
 
-    if((seeds->empty()) || minMaxDepthDontUseSeeds)
+    minDepth = 0.0f;
+    maxDepth = 0.0f;
+    for(int c = 0; c < tcams.size(); c++)
     {
-        minDepth = 0.0f;
-        maxDepth = 0.0f;
-        for(int c = 0; c < tcams.size(); c++)
-        {
-            int tc = tcams[c];
-            minDepth += (mp->CArr[rc] - mp->CArr[tc]).size() * minCamDist;
-            maxDepth += (mp->CArr[rc] - mp->CArr[tc]).size() * maxCamDist;
-        }
-        minDepth /= (float)tcams.size();
-        maxDepth /= (float)tcams.size();
-        midDepth = (minDepth + maxDepth) / 2.0f;
+        int tc = tcams[c];
+        minDepth += (mp->CArr[rc] - mp->CArr[tc]).size() * minCamDist;
+        maxDepth += (mp->CArr[rc] - mp->CArr[tc]).size() * maxCamDist;
     }
-    else
-    {
-        OrientedPoint rcplane;
-        rcplane.p = mp->CArr[rc];
-        rcplane.n = mp->iRArr[rc] * Point3d(0.0, 0.0, 1.0);
-        rcplane.n = rcplane.n.normalize();
-
-        minDepth = std::numeric_limits<float>::max();
-        maxDepth = -std::numeric_limits<float>::max();
-
-        // StaticVector<sortedId> *sos = new StaticVector<sortedId>();
-        // sos->reserve(seeds->size());
-        // for (int i=0;i<seeds->size();i++) {
-        //	sos->push_back(sortedId(i,pointPlaneDistance((*seeds)[i].op.p,rcplane.p,rcplane.n)));
-        //};
-        // qsort(&(*sos)[0],sos->size(),sizeof(sortedId),qsortCompareSortedIdAsc);
-        // minDepth = (*sos)[(int)((float)sos->size()*0.1f)].value;
-        // maxDepth = (*sos)[(int)((float)sos->size()*0.9f)].value;
-
-        Point3d cg = Point3d(0.0f, 0.0f, 0.0f);
-        for(int i = 0; i < seeds->size(); i++)
-        {
-            SeedPoint* sp = &(*seeds)[i];
-            cg = cg + sp->op.p;
-            float depth = pointPlaneDistance(sp->op.p, rcplane.p, rcplane.n);
-            minDepth = std::min(minDepth, depth);
-            maxDepth = std::max(maxDepth, depth);
-        }
-        cg = cg / (float)seeds->size();
-        midDepth = pointPlaneDistance(cg, rcplane.p, rcplane.n);
-
-        maxDepth = maxDepth * maxDepthScale;
-    }
-
-    delete seeds;
+    minDepth /= static_cast<float>(tcams.size());
+    maxDepth /= static_cast<float>(tcams.size());
+    midDepth = (minDepth + maxDepth) / 2.0f;
+  }
+  else
+  {
+    std::size_t nbDepths;
+    mp->getMinMaxMidNbDepth(rc, minDepth, maxDepth, midDepth, nbDepths);
+    maxDepth = maxDepth * maxDepthScale;
+  }
 }
 
 StaticVector<float>* PlaneSweepingCuda::getDepthsByPixelSize(int rc, float minDepth, float midDepth, float maxDepth,
@@ -471,7 +428,7 @@ StaticVector<float>* PlaneSweepingCuda::getDepthsRcTc(int rc, int tc, int scale,
             float depth = orientedPointPlaneDistance(p, rcplane.p, rcplane.n); // todo: can compute the distance to the camera (as it's the principal point it's the same)
             if( mp->isPixelInImage(tpix, tc)
                 && (depth > 0.0f)
-                && checkPair(p, rc, tc, mp, pc->minang, pc->maxang) )
+                && checkPair(p, rc, tc, mp, mp->getMinViewAngle(), mp->getMaxViewAngle()) )
             {
                 cg = cg + tpix;
                 cg3 = cg3 + p;
@@ -547,9 +504,9 @@ StaticVector<float>* PlaneSweepingCuda::getDepthsRcTc(int rc, int tc, int scale,
         float depth = orientedPointPlaneDistance(p, rcplane.p, rcplane.n);
         if (mp->isPixelInImage(tpix, tc)
             && (depth > 0.0f) && (depth > depthOld)
-            && checkPair(p, rc, tc, mp, pc->minang, pc->maxang)
-            && (rptpang > pc->minang)  // WARNING if vects are near parallel thaen this results to strange angles ...
-            && (rptpang < pc->maxang)) // this is the propper angle ... beacause is does not depend on the triangluated p
+            && checkPair(p, rc, tc, mp, mp->getMinViewAngle(), mp->getMaxViewAngle())
+            && (rptpang > mp->getMinViewAngle())  // WARNING if vects are near parallel thaen this results to strange angles ...
+            && (rptpang < mp->getMaxViewAngle())) // this is the propper angle ... beacause is does not depend on the triangluated p
         {
             out1->push_back(depth);
             // if ((tpix.x!=tpixold.x)||(tpix.y!=tpixold.y)||(depthOld>=depth))
@@ -584,9 +541,9 @@ StaticVector<float>* PlaneSweepingCuda::getDepthsRcTc(int rc, int tc, int scale,
         float depth = orientedPointPlaneDistance(p, rcplane.p, rcplane.n);
         if(mp->isPixelInImage(tpix, tc)
             && (depth > 0.0f) && (depth < depthOld) 
-            && checkPair(p, rc, tc, mp, pc->minang, pc->maxang)
-            && (rptpang > pc->minang)  // WARNING if vects are near parallel thaen this results to strange angles ...
-            && (rptpang < pc->maxang)) // this is the propper angle ... beacause is does not depend on the triangluated p
+            && checkPair(p, rc, tc, mp, mp->getMinViewAngle(), mp->getMaxViewAngle())
+            && (rptpang > mp->getMinViewAngle())  // WARNING if vects are near parallel thaen this results to strange angles ...
+            && (rptpang < mp->getMaxViewAngle())) // this is the propper angle ... beacause is does not depend on the triangluated p
         {
             out2->push_back(depth);
             // printf("%f %f\n",tpix.x,tpix.y);
@@ -1009,6 +966,43 @@ bool PlaneSweepingCuda::optimizeDepthSimMapGradientDescent(StaticVector<DepthSim
         mvsUtils::printfElapsedTime(t1);
 
     return true;
+}
+
+bool PlaneSweepingCuda::computeNormalMap(StaticVector<float>* depthMap, StaticVector<Color>* normalMap, int rc,
+  int scale, float igammaC, float igammaP, int wsh)
+{
+  const int w = mp->getWidth(rc) / scale;
+  const int h = mp->getHeight(rc) / scale;
+
+  const long t1 = clock();
+
+  ALICEVISION_LOG_DEBUG("computeNormalMap rc: " << rc);
+  cameraStruct camera;
+  camera.camId = rc;
+  cps_fillCamera(&camera, rc, mp, nullptr, scale);
+
+  CudaHostMemoryHeap<float3, 2> normalMap_hmh(CudaSize<2>(w, h));
+  CudaHostMemoryHeap<float, 2> depthMap_hmh(CudaSize<2>(w, h));
+
+  for (int i = 0; i < w * h; i++)
+  {
+    depthMap_hmh.getBuffer()[i] = (*depthMap)[i];
+  }
+
+  ps_computeNormalMap((CudaArray<uchar4, 2>**)ps_texs_arr, &normalMap_hmh, &depthMap_hmh, camera, w, h, scale - 1,
+    _CUDADeviceNo, _nImgsInGPUAtTime, _scales, wsh, _verbose, igammaC, igammaP);
+
+  for (int i = 0; i < w * h; i++)
+  {
+    (*normalMap)[i].r = normalMap_hmh.getBuffer()[i].x;
+    (*normalMap)[i].g = normalMap_hmh.getBuffer()[i].y;
+    (*normalMap)[i].b = normalMap_hmh.getBuffer()[i].z;
+  }
+
+  if (_verbose)
+    mvsUtils::printfElapsedTime(t1);
+
+  return true;
 }
 
 bool PlaneSweepingCuda::getSilhoueteMap(StaticVectorBool* oMap, int scale, int step, const rgb maskColor, int rc)

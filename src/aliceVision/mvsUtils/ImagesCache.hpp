@@ -46,12 +46,12 @@ public:
 
         inline Color& at( int x, int y )
         {
-            return data[x * _height + y];
+            return data[y * _width + x];
         }
 
         inline const Color& at( int x, int y ) const
         {
-            return data[x * _height + y];
+            return data[y * _width + x];
         }
 
         Color* data;
@@ -76,24 +76,23 @@ private:
     std::vector<std::string> imagesNames;
 
     const int  bandType;
-public:
-    const bool transposed;
 
 public:
-    ImagesCache( const MultiViewParams* _mp, int _bandType,
-                 bool _transposed = false);
-    ImagesCache( const MultiViewParams* _mp, int _bandType, std::vector<std::string>& _imagesNames,
-                 bool _transposed = false);
+    ImagesCache( const MultiViewParams* _mp, int _bandType);
+    ImagesCache( const MultiViewParams* _mp, int _bandType, std::vector<std::string>& _imagesNames);
     void initIC( std::vector<std::string>& _imagesNames );
     ~ImagesCache();
 
-    inline ImgPtr getImg( int camId ) {
-        refreshData(camId);
+    inline ImgPtr getImg_sync( int camId )
+    {
+        refreshData_sync(camId);
         const int imageId = camIdMapId[camId];
         return imgs[imageId];
     }
 
     void refreshData(int camId);
+    void refreshData_sync(int camId);
+
     std::future<void> refreshData_async(int camId);
 
     Color getPixelValueInterpolated(const Point2d* pix, int camId);

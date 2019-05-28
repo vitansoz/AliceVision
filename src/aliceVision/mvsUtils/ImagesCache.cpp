@@ -13,24 +13,21 @@
 namespace aliceVision {
 namespace mvsUtils {
 
-ImagesCache::ImagesCache(const MultiViewParams* _mp, int _bandType, bool _transposed)
+ImagesCache::ImagesCache(const MultiViewParams* _mp, int _bandType)
   : mp(_mp)
   , bandType( _bandType )
-  , transposed( _transposed )
 {
     std::vector<std::string> _imagesNames;
-    for(int rc = 0; rc < _mp->ncams; rc++)
+    for(int rc = 0; rc < _mp->getNbCameras(); rc++)
     {
-        _imagesNames.push_back(mv_getFileNamePrefix(_mp->mvDir, _mp, rc) + "." + _mp->getImageExtension());
+        _imagesNames.push_back(_mp->getImagePath(rc));
     }
     initIC( _imagesNames );
 }
 
-ImagesCache::ImagesCache(const MultiViewParams* _mp, int _bandType, std::vector<std::string>& _imagesNames,
-                                 bool _transposed)
+ImagesCache::ImagesCache(const MultiViewParams* _mp, int _bandType, std::vector<std::string>& _imagesNames)
   : mp(_mp)
   , bandType( _bandType )
-  , transposed( _transposed )
 {
     initIC( _imagesNames );
 }
@@ -38,8 +35,8 @@ ImagesCache::ImagesCache(const MultiViewParams* _mp, int _bandType, std::vector<
 void ImagesCache::initIC( std::vector<std::string>& _imagesNames )
 {
     float oneimagemb = (sizeof(Color) * mp->getMaxImageWidth() * mp->getMaxImageHeight()) / 1024.f / 1024.f;
-    float maxmbCPU = (float)mp->_ini.get<int>("images_cache.maxmbCPU", 5000);
-    int _npreload = std::max((int)(maxmbCPU / oneimagemb), mp->_ini.get<int>("grow.minNumOfConsistentCams", 10));
+    float maxmbCPU = (float)mp->userParams.get<int>("images_cache.maxmbCPU", 5000);
+    int _npreload = std::max((int)(maxmbCPU / oneimagemb), 5); // image cache has a minimum size of 5
     N_PRELOADED_IMAGES = std::min(mp->ncams, _npreload);
 
     for(int rc = 0; rc < mp->ncams; rc++)
@@ -70,8 +67,6 @@ ImagesCache::~ImagesCache()
 
 void ImagesCache::refreshData(int camId)
 {
-    std::lock_guard<std::mutex> lock(imagesMutexes[camId]);
-
     // printf("camId %i\n",camId);
     // test if the image is in the memory
     if(camIdMapId[camId] == -1)
@@ -81,6 +76,7 @@ void ImagesCache::refreshData(int camId)
         int oldCamId = mapIdCamId[mapId];
         if(oldCamId>=0)
             camIdMapId[oldCamId] = -1;
+            // TODO: oldCamId should be protected if already used
 
         // replace with new new
         camIdMapId[camId] = mapId;
@@ -102,17 +98,24 @@ void ImagesCache::refreshData(int camId)
 
         ALICEVISION_LOG_DEBUG("Add " << imagePath << " to image cache. " << formatElapsedTime(t1));
     }
+    else
+    {
+      ALICEVISION_LOG_DEBUG("Reuse " << imagesNames.at(camId) << " from image cache. ");
+    }
+}
+void ImagesCache::refreshData_sync(int camId)
+{
+  std::lock_guard<std::mutex> lock(imagesMutexes[camId]);
+  refreshData(camId);
 }
 
 std::future<void> ImagesCache::refreshData_async(int camId)
 {
-    return std::async(&ImagesCache::refreshData, this, camId);
+    return std::async(&ImagesCache::refreshData_sync, this, camId);
 }
 
 Color ImagesCache::getPixelValueInterpolated(const Point2d* pix, int camId)
 {
-    refreshData(camId);
-
     // get the image index in the memory
     const int i = camIdMapId[camId];
     const ImgPtr& img = imgs[i];

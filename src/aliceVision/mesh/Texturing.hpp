@@ -74,6 +74,7 @@ struct TexturingParams
     unsigned int padding = 15;
     unsigned int downscale = 2;
     bool fillHoles = false;
+    bool useUDIM = true;
 };
 
 struct Texturing
@@ -108,12 +109,13 @@ public:
     void loadFromOBJ(const std::string& filename, bool flipNormals=false);
 
     /**
-     * @brief Load a mesh from a dense reconstruction.
+     * @brief Remap visibilities
      *
-     * @param meshFilepath the path to the .bin mesh file
-     * @param visibilitiesFilepath the path to the .bin points visibilities file
+     * @param[in] remappingMethod the remapping method
+     * @param[in] refMesh the reference mesh
+     * @param[in] refPointsVisibilities the reference visibilities
      */
-    void loadFromMeshing(const std::string& meshFilepath, const std::string& visibilitiesFilepath);
+    void remapVisibilities(EVisibilityRemappingMethod remappingMethod, const Mesh& refMesh, const mesh::PointsVisibility& refPointsVisibilities);
 
     /**
      * @brief Replace inner mesh with the mesh loaded from 'otherMeshPath'
@@ -135,21 +137,21 @@ public:
     void unwrap(mvsUtils::MultiViewParams& mp, EUnwrapMethod method);
 
     /**
-     * @brief Generate automatic texture atlasing and UV coordinates based on points visibilities
+     * @brief Generate automatic texture atlasing and UV coordinates based on points visibilities with the "Basic" method.
      *
      * Requires internal mesh 'me' to be initialized.
      *
      * @param mp
      */
-    void generateUVs(mvsUtils::MultiViewParams &mp);
+    void generateUVsBasicMethod(mvsUtils::MultiViewParams &mp);
 
     /// Generate texture files for all texture atlases
     void generateTextures(const mvsUtils::MultiViewParams& mp,
                           const bfs::path &outPath, EImageFileType textureFileType = EImageFileType::PNG);
 
-    /// Generate texture files for the given texture atlas index
-    void generateTexture(const mvsUtils::MultiViewParams& mp,
-                         size_t atlasID, mvsUtils::ImagesCache& imageCache,
+    /// Generate texture files for the given sub-set of texture atlases
+    void generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
+                         std::vector<size_t> atlasIDs, mvsUtils::ImagesCache& imageCache,
                          const bfs::path &outPath, EImageFileType textureFileType = EImageFileType::PNG);
 
     /// Save textured mesh as an OBJ + MTL file
