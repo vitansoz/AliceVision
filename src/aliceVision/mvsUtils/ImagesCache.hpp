@@ -6,97 +6,85 @@
 
 #pragma once
 
-#include <aliceVision/mvsData/Color.hpp>
+#include <aliceVision/image/Image.hpp>
+#include <aliceVision/image/Rgb.hpp>
+#include <aliceVision/image/io.hpp>
+#include <aliceVision/image/pixelTypes.hpp>
 #include <aliceVision/mvsData/Point2d.hpp>
-#include <aliceVision/mvsData/Rgb.hpp>
 #include <aliceVision/mvsData/StaticVector.hpp>
 #include <aliceVision/mvsUtils/MultiViewParams.hpp>
 
+#include <list>
 #include <future>
 #include <mutex>
 
 namespace aliceVision {
 namespace mvsUtils {
 
+enum class ECorrectEV
+{
+    NO_CORRECTION,
+    APPLY_CORRECTION
+};
+
+std::string ECorrectEV_enumToString(const ECorrectEV correctEV);
+
+template<typename Image>
 class ImagesCache
 {
-public:
-    class Img
-    {
-        int  _width;
-        int  _height;
-    public:
-        Img( )
-            : data(nullptr)
-        { }
-        Img( size_t sz )
-            : data( new Color[sz] )
-        { }
+  public:
+    using Color = typename Image::Tpixel;
+    using ImgSharedPtr = std::shared_ptr<Image>;
 
-        ~Img( )
-        {
-            delete [] data;
-        }
-
-        inline void setWidth(  int w ) { _width  = w; }
-        inline void setHeight( int h ) { _height = h; }
-
-        inline int  getWidth()  const { return _width;  }
-        inline int  getHeight() const { return _height; }
-
-        inline Color& at( int x, int y )
-        {
-            return data[y * _width + x];
-        }
-
-        inline const Color& at( int x, int y ) const
-        {
-            return data[y * _width + x];
-        }
-
-        Color* data;
-    };
-
-    typedef std::shared_ptr<Img> ImgPtr;
-
-public:
-    const MultiViewParams* mp;
-
-private:
+  private:
     ImagesCache(const ImagesCache&) = delete;
 
-    int N_PRELOADED_IMAGES;
-    std::vector<ImgPtr> imgs;
+    const MultiViewParams& _mp;
 
-    std::vector<int> camIdMapId;
-    std::vector<int> mapIdCamId;
-    StaticVector<long> mapIdClock;
+    int _N_PRELOADED_IMAGES;
+    std::vector<ImgSharedPtr> _imgs;
 
-    std::vector<std::mutex> imagesMutexes;
-    std::vector<std::string> imagesNames;
+    std::vector<int> _camIdMapId;
+    std::vector<int> _mapIdCamId;
+    StaticVector<long> _mapIdClock;
 
-    const int  bandType;
+    std::vector<std::mutex> _imagesMutexes;
+    std::vector<std::string> _imagesNames;
 
-public:
-    ImagesCache( const MultiViewParams* _mp, int _bandType);
-    ImagesCache( const MultiViewParams* _mp, int _bandType, std::vector<std::string>& _imagesNames);
-    void initIC( std::vector<std::string>& _imagesNames );
-    ~ImagesCache();
+    std::list<std::future<void>> _asyncObjects;
 
-    inline ImgPtr getImg_sync( int camId )
+    image::EImageColorSpace _colorspace{image::EImageColorSpace::AUTO};
+    ECorrectEV _correctEV{ECorrectEV::NO_CORRECTION};
+
+  public:
+    ImagesCache(const MultiViewParams& mp, image::EImageColorSpace colorspace, ECorrectEV correctEV = ECorrectEV::NO_CORRECTION);
+
+    ImagesCache(const MultiViewParams& mp,
+                image::EImageColorSpace colorspace,
+                std::vector<std::string>& imagesNames,
+                ECorrectEV correctEV = ECorrectEV::NO_CORRECTION);
+
+    void initIC(std::vector<std::string>& imagesNames);
+    void setCacheSize(int nbPreload);
+    void setCorrectEV(const ECorrectEV correctEV) { _correctEV = correctEV; }
+    ~ImagesCache() = default;
+
+    inline ImgSharedPtr getImg_sync(int camId)
     {
-        refreshData_sync(camId);
-        const int imageId = camIdMapId[camId];
-        return imgs[imageId];
+        refreshImage_sync(camId);
+        const int imageId = _camIdMapId[camId];
+        return _imgs[imageId];
     }
 
     void refreshData(int camId);
-    void refreshData_sync(int camId);
+    void refreshImage_sync(int camId);
 
-    std::future<void> refreshData_async(int camId);
+    void refreshImage_async(int camId);
 
-    Color getPixelValueInterpolated(const Point2d* pix, int camId);
+    void refreshImages_sync(const std::vector<int>& camIds);
+
+    void refreshImages_async(const std::vector<int>& camIds);
 };
 
-} // namespace mvsUtils
-} // namespace aliceVision
+}  // namespace mvsUtils
+}  // namespace aliceVision

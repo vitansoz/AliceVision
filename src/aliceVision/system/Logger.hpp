@@ -9,7 +9,6 @@
 #include <aliceVision/config.hpp>
 #include <aliceVision/prettyprint.hpp>
 
-#define BOOST_LOG_DYN_LINK 1
 #include <boost/log/trivial.hpp>
 
 #include <memory>
@@ -36,14 +35,13 @@
 #define ALICEVISION_LOG_ERROR(a) ALICEVISION_LOG(ALICEVISION_LOG_ERROR_OBJ, a)
 #define ALICEVISION_LOG_FATAL(a) ALICEVISION_LOG(ALICEVISION_LOG_FATAL_OBJ, a)
 
-#define ALICEVISION_THROW(EXCEPTION, x) \
-{ \
-  std::stringstream s; \
-  s << x; \
-  throw EXCEPTION(s.str()); \
-}
+#define ALICEVISION_THROW(EXCEPTION, x)                                                                                                              \
+    {                                                                                                                                                \
+        std::stringstream s;                                                                                                                         \
+        s << x;                                                                                                                                      \
+        throw EXCEPTION(s.str());                                                                                                                    \
+    }
 #define ALICEVISION_THROW_ERROR(x) ALICEVISION_THROW(std::runtime_error, x)
-
 
 namespace aliceVision {
 namespace system {
@@ -60,100 +58,63 @@ enum class EVerboseLevel
 
 /**
  * @brief convert an enum EVerboseLevel to its corresponding string
- * @param EVerboseLevel
- * @return String
+ * @param[in] verboseLevel The verbose level.
+ * @return the string corresponding to the verbose level.
  */
-inline std::string EVerboseLevel_enumToString(const EVerboseLevel verboseLevel)
-{
-  switch(verboseLevel)
-  {
-    case EVerboseLevel::Fatal:   return "fatal";
-    case EVerboseLevel::Error:   return "error";
-    case EVerboseLevel::Warning: return "warning";
-    case EVerboseLevel::Info:    return "info";
-    case EVerboseLevel::Debug:   return "debug";
-    case EVerboseLevel::Trace:   return "trace";
-   }
-  throw std::out_of_range("Invalid verbose level enum");
-}
+std::string EVerboseLevel_enumToString(EVerboseLevel verboseLevel);
 
 /**
- * @brief convert a string verboseLevel to its corresponding enum EVerboseLevel
- * @param String
- * @return EVerboseLevel
+ * @brief convert a string  to its corresponding enum EVerboseLevel
+ * @param[in] verboseLevel the string with the verbose level
+ * @return the corresponding EVerboseLevel
  */
-inline EVerboseLevel EVerboseLevel_stringToEnum(const std::string& verboseLevel)
-{
-  std::string level = verboseLevel;
-  std::transform(level.begin(), level.end(), level.begin(), ::tolower);
+EVerboseLevel EVerboseLevel_stringToEnum(std::string verboseLevel);
 
-  if(verboseLevel == "fatal")   return EVerboseLevel::Fatal;
-  if(verboseLevel == "error")   return EVerboseLevel::Error;
-  if(verboseLevel == "warning") return EVerboseLevel::Warning;
-  if(verboseLevel == "info")    return EVerboseLevel::Info;
-  if(verboseLevel == "debug")   return EVerboseLevel::Debug;
-  if(verboseLevel == "trace")   return EVerboseLevel::Trace;
+std::ostream& operator<<(std::ostream& os, EVerboseLevel verboseLevel);
 
-  throw std::out_of_range("Invalid verbose level : '" + verboseLevel + "'");
-}
-
-inline std::ostream& operator<<(std::ostream& os, const EVerboseLevel verboseLevel)
-{
-  os << EVerboseLevel_enumToString(verboseLevel);
-  return os;
-}
-
-inline std::istream& operator>>(std::istream& in, EVerboseLevel& verboseLevel)
-{
-  std::string token;
-  in >> token;
-  verboseLevel = EVerboseLevel_stringToEnum(token);
-  return in;
-}
+std::istream& operator>>(std::istream& in, EVerboseLevel& verboseLevel);
 
 class Logger
 {
-public:
+  public:
+    /**
+     * @brief get Logger instance
+     * @return instance
+     */
+    static std::shared_ptr<Logger> get();
 
-  /**
-   * @brief get Logger instance
-   * @return instance
-   */
-  static std::shared_ptr<Logger> get();
+    /**
+     * @brief get default verbose level
+     * @return default verbose level
+     */
+    static EVerboseLevel getDefaultVerboseLevel();
 
-  /**
-   * @brief get default verbose level
-   * @return default verbose level
-   */
-  static EVerboseLevel getDefaultVerboseLevel();
+    /**
+     * @brief set Logger level with EVerboseLevel enum
+     * @param level EVerboseLevel enum
+     */
+    void setLogLevel(const EVerboseLevel level);
 
-  /**
-   * @brief set Logger level with EVerboseLevel enum
-   * @param level EVerboseLevel enum
-   */
-  void setLogLevel(const EVerboseLevel level);
+    /**
+     * @brief set Logger level with string
+     * @param level string
+     */
+    void setLogLevel(const std::string& level);
 
-  /**
-   * @brief set Logger level with string
-   * @param level string
-   */
-  void setLogLevel(const std::string& level);
+  private:
+    /**
+     * @brief Logger private constructor
+     */
+    Logger();
 
-private:
+    /**
+     * @brief setLogLevel with boost severity level
+     * @param level boost severity level
+     */
+    void setLogLevel(const boost::log::trivial::severity_level level);
 
-  /**
-   * @brief Logger private constructor
-   */
-  Logger();
-
-  /**
-   * @brief setLogLevel with boost severity level
-   * @param level boost severity level
-   */
-  void setLogLevel(const boost::log::trivial::severity_level level);
-
-  static std::shared_ptr<Logger> _instance;
+    static std::shared_ptr<Logger> _instance;
 };
 
-} // namespace system
-} // namespace aliceVision
+}  // namespace system
+}  // namespace aliceVision

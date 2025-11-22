@@ -16,7 +16,7 @@ namespace mesh {
 
 class MeshAnalyze : public MeshClean
 {
-public:
+  public:
     MeshAnalyze(mvsUtils::MultiViewParams* _mp);
     ~MeshAnalyze();
 
@@ -25,12 +25,12 @@ public:
     int getVertexIdInTriangleForPtId(int ptId, int triId);
     bool getVertexMeanCurvatureNormal(int ptId, Point3d& Kh);
     void getVertexPrincipalCurvatures(double Kh, double Kg, double& K1, double& K2);
-    bool applyLaplacianOperator(int ptId, StaticVector<Point3d>* ptsToApplyLaplacianOp, Point3d& ln);
+    bool applyLaplacianOperator(int ptId, const StaticVector<Point3d>& ptsToApplyLaplacianOp, Point3d& ln);
     bool getLaplacianSmoothingVector(int ptId, Point3d& ln);
-    bool getBiLaplacianSmoothingVector(int ptId, StaticVector<Point3d>* ptsLaplacian, Point3d& tp);
+    bool getBiLaplacianSmoothingVector(int ptId, const StaticVector<Point3d>& ptsLaplacian, Point3d& tp);
     bool getMeanCurvAndLaplacianSmoothing(int ptId, Point3d& F, float epsilon);
     bool getVertexSurfaceNormal(int ptId, Point3d& N);
 };
 
-} // namespace mesh
-} // namespace aliceVision
+}  // namespace mesh
+}  // namespace aliceVision

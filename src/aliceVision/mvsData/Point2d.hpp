@@ -7,13 +7,15 @@
 #pragma once
 
 #include <cmath>
+#include <ostream>
 
 namespace aliceVision {
 
 class Point2d
 {
-public:
-    union {
+  public:
+    union
+    {
         struct
         {
             double x, y;
@@ -46,30 +48,15 @@ public:
         return *this;
     }
 
-    inline Point2d operator-(const Point2d& _p) const
-    {
-        return Point2d(x - _p.x, y - _p.y);
-    }
+    inline Point2d operator-(const Point2d& _p) const { return Point2d(x - _p.x, y - _p.y); }
 
-    inline Point2d operator+(const Point2d& _p) const
-    {
-        return Point2d(x + _p.x, y + _p.y);
-    }
+    inline Point2d operator+(const Point2d& _p) const { return Point2d(x + _p.x, y + _p.y); }
 
-    inline Point2d operator*(const double d) const
-    {
-        return Point2d(x * d, y * d);
-    }
+    inline Point2d operator*(const double d) const { return Point2d(x * d, y * d); }
 
-    inline Point2d operator+(const double d) const
-    {
-        return Point2d(x + d, y + d);
-    }
+    inline Point2d operator+(const double d) const { return Point2d(x + d, y + d); }
 
-    inline Point2d operator/(const double d) const
-    {
-        return Point2d(x / d, y / d);
-    }
+    inline Point2d operator/(const double d) const { return Point2d(x / d, y / d); }
 
     inline Point2d normalize() const
     {
@@ -77,17 +64,17 @@ public:
         return Point2d(x / d, y / d);
     }
 
-    inline double size() const
-    {
-        return std::sqrt(x * x + y * y);
-    }
+    inline double size() const { return std::sqrt(x * x + y * y); }
 
     friend double dot(const Point2d& p1, const Point2d& p2);
 };
 
-inline double dot(const Point2d& p1, const Point2d& p2)
+inline double dot(const Point2d& p1, const Point2d& p2) { return p1.x * p2.x + p1.y * p2.y; }
+
+inline std::ostream& operator<<(std::ostream& stream, const Point2d& p)
 {
-    return p1.x * p2.x + p1.y * p2.y;
+    stream << p.x << "," << p.y;
+    return stream;
 }
 
-} // namespace aliceVision
+}  // namespace aliceVision

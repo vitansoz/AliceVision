@@ -10,18 +10,31 @@
 #include <aliceVision/numeric/numeric.hpp>
 #include <aliceVision/feature/feature.hpp>
 #include <aliceVision/feature/RegionsPerView.hpp>
-#include <aliceVision/track/Track.hpp>
+#include <aliceVision/track/TracksBuilder.hpp>
 
 #include <memory>
 
 namespace aliceVision {
 
-enum EHistogramSelectionMethod
+enum class EHistogramSelectionMethod
 {
-    eHistogramHarmonizeFullFrame     = 0,
-    eHistogramHarmonizeMatchedPoints = 1,
-    eHistogramHarmonizeVLDSegment    = 2,
+    eHistogramHarmonizeFullFrame = 0,
+    eHistogramHarmonizeMatchedPoints,
+    eHistogramHarmonizeVLDSegment
 };
+
+inline std::string EHistogramSelectionMethod_description()
+{
+    return "Histogram selection method: \n"
+           "* full_frame \n"
+           "* matched_points \n"
+           "* VLD_segments\n";
+}
+
+EHistogramSelectionMethod EEHistogramSelectionMethod_stringToEnum(const std::string& histogramSelectionMethod);
+std::string EHistogramSelectionMethod_enumToString(const EHistogramSelectionMethod histogramSelectionMethod);
+std::ostream& operator<<(std::ostream& os, EHistogramSelectionMethod p);
+std::istream& operator>>(std::istream& in, EHistogramSelectionMethod& p);
 
 /**
  * @brief The ColorHarmonizationEngineGlobal class
@@ -33,50 +46,48 @@ enum EHistogramSelectionMethod
  */
 class ColorHarmonizationEngineGlobal
 {
-public:
-  ColorHarmonizationEngineGlobal(
-    const std::string& sfmDataFilename,
-    const std::vector<std::string>& featuresFolders,
-    const std::vector<std::string>& matchesFolders,
-    const std::string& outputDirectory,
-    const std::vector<feature::EImageDescriberType>& descTypes,
-    int selectionMethod = -1,
-    int imgRef = -1);
+  public:
+    ColorHarmonizationEngineGlobal(const std::string& sfmDataFilename,
+                                   const std::vector<std::string>& featuresFolders,
+                                   const std::vector<std::string>& matchesFolders,
+                                   const std::string& outputDirectory,
+                                   const std::vector<feature::EImageDescriberType>& descTypes,
+                                   EHistogramSelectionMethod selectionMethod,
+                                   int imgRef = 0);
 
-  ~ColorHarmonizationEngineGlobal();
+    ~ColorHarmonizationEngineGlobal();
 
-  virtual bool Process();
+    virtual bool process();
 
-private:
+  private:
+    EHistogramSelectionMethod _selectionMethod;
+    int _imgRef;
 
-  EHistogramSelectionMethod _selectionMethod;
-  int _imgRef;
+    // Input data
 
-  // Input data
+    feature::RegionsPerView _regionsPerView;
+    /// considered images
+    std::vector<std::string> _fileNames;
+    /// size of each image
+    std::vector<std::pair<size_t, size_t>> _imageSize;
+    /// pairwise geometric matches
+    aliceVision::matching::PairwiseMatches _pairwiseMatches;
+    /// describer type use for color harmonizations
+    std::vector<feature::EImageDescriberType> _descTypes;
+    /// path to the Sfm Scene
+    std::string _sfmDataFilename;
+    /// path to matches
+    std::vector<std::string> _matchesFolders;
+    /// path to features
+    std::vector<std::string> _featuresFolders;
+    /// output path where outputs will be stored
+    std::string _outputDirectory;
 
-  feature::RegionsPerView _regionsPerView;
-  /// considered images
-  std::vector<std::string> _fileNames;
-  /// size of each image
-  std::vector<std::pair<size_t, size_t>> _imageSize;
-  /// pairwise geometric matches
-  aliceVision::matching::PairwiseMatches _pairwiseMatches;
-  /// describer type use for color harmonizations
-  std::vector<feature::EImageDescriberType> _descTypes;
-  /// path to the Sfm Scene
-  std::string _sfmDataFilename;
-  /// path to matches
-  std::vector<std::string> _matchesFolders;
-  /// path to features
-  std::vector<std::string> _featuresFolders;
-  /// output path where outputs will be stored
-  std::string _outputDirectory;
+    /// Clean graph
+    bool cleanGraph();
 
-  /// Clean graph
-  bool CleanGraph();
-
-  /// Read input data (point correspondences)
-  bool ReadInputData();
+    /// Read input data (point correspondences)
+    bool readInputData();
 };
 
-} // namespace aliceVision
+}  // namespace aliceVision

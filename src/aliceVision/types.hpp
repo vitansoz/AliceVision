@@ -6,46 +6,40 @@
 
 #pragma once
 
-#include <Eigen/Core>
-
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <set>
 #include <vector>
 
-#ifdef ALICEVISION_STD_UNORDERED_MAP
-#include <unordered_map>
-#endif
-
 namespace aliceVision {
 
 typedef uint32_t IndexT;
 static const IndexT UndefinedIndexT = std::numeric_limits<IndexT>::max();
 
-typedef std::pair<IndexT,IndexT> Pair;
+typedef std::pair<IndexT, IndexT> Pair;
 typedef std::set<Pair> PairSet;
 typedef std::vector<Pair> PairVec;
 
-#ifdef ALICEVISION_UNORDERED_MAP
-template<typename Key, typename Value>
-struct HashMap : std::unordered_map<Key, Value> {};
-#else
-template<typename K, typename V>
-struct HashMap : std::map<K, V, std::less<K>,
- Eigen::aligned_allocator<std::pair<const K,V> > > {};
-#endif
-
-
 struct EstimationStatus
 {
-  EstimationStatus(bool valid, bool strongSupport)
-    : isValid(valid)
-    , hasStrongSupport(strongSupport)
-  {}
+    EstimationStatus(bool valid, bool strongSupport)
+      : isValid(valid),
+        hasStrongSupport(strongSupport)
+    {}
 
-  bool isValid = false;
-  bool hasStrongSupport = false;
+    bool isValid = false;
+    bool hasStrongSupport = false;
 };
 
-} // namespace aliceVision
+/**
+ * @brief Defines the state of a parameter for an estimator
+ */
+enum class EEstimatorParameterState : std::uint8_t
+{
+    REFINED = 0,   //< will be adjusted by the estimator
+    CONSTANT = 1,  //< will be set as constant in the estimator
+    IGNORED = 2    //< will not be set into the estimator
+};
+
+}  // namespace aliceVision

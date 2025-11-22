@@ -4,8 +4,9 @@
 // v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
-#include <aliceVision/system/cmdline.hpp>
+#include <aliceVision/cmdline/cmdline.hpp>
 #include <aliceVision/system/Logger.hpp>
+#include <aliceVision/system/main.hpp>
 #include <aliceVision/system/Timer.hpp>
 #include <aliceVision/mvsUtils/common.hpp>
 
@@ -20,7 +21,8 @@
 #include <OpenMesh/Core/IO/IOManager.hh>
 
 #include <boost/program_options.hpp>
-#include <boost/filesystem.hpp>
+
+#include <filesystem>
 
 // These constants define the current software version.
 // They must be updated when the command line is changed.
@@ -29,18 +31,16 @@
 
 using namespace aliceVision;
 
-namespace bfs = boost::filesystem;
+namespace fs = std::filesystem;
 namespace po = boost::program_options;
 
-int main(int argc, char* argv[])
+int aliceVision_main(int argc, char* argv[])
 {
     system::Timer timer;
-
-    std::string verboseLevel = system::EVerboseLevel_enumToString(system::Logger::getDefaultVerboseLevel());
     std::string inputMeshPath;
     std::string outputMeshPath;
 
-    int denoisingIterations = 5; // OuterIterations
+    int denoisingIterations = 5;  // OuterIterations
     float meshUpdateClosenessWeight = 0.001;
     int meshUpdateIterations = 20;
     int meshUpdateMethod = SDFilter::MeshFilterParameters::ITERATIVE_UPDATE;
@@ -49,95 +49,62 @@ int main(int argc, char* argv[])
     float mu = 1.5;
     float nu = 0.3;
 
-    po::options_description allParams("AliceVision meshDenoising");
-
+    // clang-format off
     po::options_description requiredParams("Required parameters");
     requiredParams.add_options()
         ("input,i", po::value<std::string>(&inputMeshPath)->required(),
-            "Input Mesh (OBJ file format).")
+         "Input Mesh (OBJ file format).")
         ("output,o", po::value<std::string>(&outputMeshPath)->required(),
-            "Output mesh (OBJ file format).");
+         "Output mesh (OBJ file format).");
 
     po::options_description optionalParams("Optional parameters");
     optionalParams.add_options()
         ("denoisingIterations", po::value<int>(&denoisingIterations)->default_value(denoisingIterations),
-            "Number of denoising iterations.")
+         "Number of denoising iterations.")
         ("meshUpdateClosenessWeight", po::value<float>(&meshUpdateClosenessWeight)->default_value(meshUpdateClosenessWeight),
-            "Closeness weight for mesh update, must be positive.")
+         "Closeness weight for mesh update, must be positive.")
         ("lambda", po::value<float>(&lambda)->default_value(lambda),
-            "Regularization weight.")
+         "Regularization weight.")
         ("eta", po::value<float>(&eta)->default_value(eta),
-            "Gaussian standard deviation for spatial weight, scaled by the average distance between adjacent face centroids. Must be positive.")
+         "Gaussian standard deviation for spatial weight, scaled by the average distance between adjacent face centroids. Must be positive.")
         ("mu", po::value<float>(&mu)->default_value(mu),
-            "Gaussian standard deviation for guidance weight.")
+         "Gaussian standard deviation for guidance weight.")
         ("nu", po::value<float>(&nu)->default_value(nu),
-            "Gaussian standard deviation for signal weight.")
+         "Gaussian standard deviation for signal weight.")
         ("meshUpdateMethod", po::value<int>(&meshUpdateMethod)->default_value(meshUpdateMethod),
-            "Mesh Update Method: \n"
-            "* ITERATIVE_UPDATE(" BOOST_PP_STRINGIZE(SDFilter::MeshFilterParameters::ITERATIVE_UPDATE) ") (default): ShapeUp styled iterative solver\n"
-            "* POISSON_UPDATE(" BOOST_PP_STRINGIZE(SDFilter::MeshFilterParameters::POISSON_UPDATE) "): Poisson-based update from [Want et al. 2015]\n");
+         "Mesh Update Method: \n"
+         "* ITERATIVE_UPDATE(" BOOST_PP_STRINGIZE(SDFilter::MeshFilterParameters::ITERATIVE_UPDATE) ") (default): ShapeUp styled iterative solver\n"
+         "* POISSON_UPDATE(" BOOST_PP_STRINGIZE(SDFilter::MeshFilterParameters::POISSON_UPDATE) "): Poisson-based update from [Wang et al. 2015] \"Rolling guidance normal filter for geometric processing\"\n");
+    // clang-format on
 
-    po::options_description logParams("Log parameters");
-    logParams.add_options()
-      ("verboseLevel,v", po::value<std::string>(&verboseLevel)->default_value(verboseLevel),
-        "verbosity level (fatal, error, warning, info, debug, trace).");
-
-    allParams.add(requiredParams).add(optionalParams).add(logParams);
-
-    po::variables_map vm;
-
-    try
+    CmdLine cmdline("AliceVision meshDenoising");
+    cmdline.add(requiredParams);
+    cmdline.add(optionalParams);
+    if (!cmdline.execute(argc, argv))
     {
-      po::store(po::parse_command_line(argc, argv, allParams), vm);
-
-      if(vm.count("help") || (argc == 1))
-      {
-        ALICEVISION_COUT(allParams);
-        return EXIT_SUCCESS;
-      }
-
-      po::notify(vm);
-    }
-    catch(boost::program_options::required_option& e)
-    {
-      ALICEVISION_CERR("ERROR: " << e.what() << std::endl);
-      ALICEVISION_COUT("Usage:\n\n" << allParams);
-      return EXIT_FAILURE;
-    }
-    catch(boost::program_options::error& e)
-    {
-      ALICEVISION_CERR("ERROR: " << e.what() << std::endl);
-      ALICEVISION_COUT("Usage:\n\n" << allParams);
-      return EXIT_FAILURE;
+        return EXIT_FAILURE;
     }
 
-    ALICEVISION_COUT("Program called with the following parameters:");
-    ALICEVISION_COUT(vm);
-
-    // set verbose level
-    system::Logger::get()->setLogLevel(verboseLevel);
-
-    bfs::path outDirectory = bfs::path(outputMeshPath).parent_path();
-    if(!bfs::is_directory(outDirectory))
-        bfs::create_directory(outDirectory);
-
+    fs::path outDirectory = fs::path(outputMeshPath).parent_path();
+    if (!fs::is_directory(outDirectory))
+        fs::create_directory(outDirectory);
 
     TriMesh inMesh;
-    if(!OpenMesh::IO::read_mesh(inMesh, inputMeshPath.c_str()))
+    if (!OpenMesh::IO::read_mesh(inMesh, inputMeshPath))
     {
         ALICEVISION_LOG_ERROR("Unable to read input mesh from the file: " << inputMeshPath);
         return EXIT_FAILURE;
     }
-    if(inMesh.n_vertices() == 0 || inMesh.n_faces() == 0)
+    if (inMesh.n_vertices() == 0 || inMesh.n_faces() == 0)
     {
         ALICEVISION_LOG_ERROR("Empty mesh from the file: " << inputMeshPath);
         ALICEVISION_LOG_ERROR("Input mesh: " << inMesh.n_vertices() << " vertices and " << inMesh.n_faces() << " facets.");
         return EXIT_FAILURE;
     }
 
-//    #ifdef USE_OPENMP
+    //    #ifdef USE_OPENMP
     Eigen::initParallel();
-//    #endif
+    //    #endif
 
     // Load option file
     SDFilter::MeshDenoisingParameters param;
@@ -150,17 +117,17 @@ int main(int argc, char* argv[])
     param.mu = mu;
     param.nu = nu;
 
-//    enum LinearSolverType
-//    {
-//            CG,
-//            LDLT
-//    };
-//    // Parameters related to termination criteria
-//    int max_iter;                   // Max number of iterations
-//    double avg_disp_eps;    // Max average per-signal displacement threshold between two iterations for determining convergence
-//    bool normalize_iterates;        // Normalization of the filtered normals in each iteration
+    //    enum LinearSolverType
+    //    {
+    //            CG,
+    //            LDLT
+    //    };
+    //    // Parameters related to termination criteria
+    //    int max_iter;                   // Max number of iterations
+    //    double avg_disp_eps;    // Max average per-signal displacement threshold between two iterations for determining convergence
+    //    bool normalize_iterates;        // Normalization of the filtered normals in each iteration
 
-    if(!param.valid_parameters())
+    if (!param.valid_parameters())
     {
         ALICEVISION_LOG_ERROR("Invalid filter options. Aborting...");
         return EXIT_FAILURE;
@@ -176,7 +143,7 @@ int main(int argc, char* argv[])
     Eigen::Vector3d original_center;
     double original_scale;
     SDFilter::normalize_mesh(inMesh, original_center, original_scale);
-    if(true)
+    if (true)
     {
         ALICEVISION_LOG_INFO("Start mesh denoising.");
         // Filter the normals and construct the output mesh
@@ -196,7 +163,7 @@ int main(int argc, char* argv[])
 
     ALICEVISION_LOG_INFO("Output mesh: " << outMesh.n_vertices() << " vertices and " << outMesh.n_faces() << " facets.");
 
-    if(outMesh.n_faces() == 0)
+    if (outMesh.n_faces() == 0)
     {
         ALICEVISION_LOG_ERROR("Failed: the output mesh is empty.");
         return EXIT_FAILURE;
@@ -204,7 +171,7 @@ int main(int argc, char* argv[])
 
     ALICEVISION_LOG_INFO("Save mesh.");
     // Save output mesh
-    if(!OpenMesh::IO::write_mesh(outMesh, outputMeshPath))
+    if (!OpenMesh::IO::write_mesh(outMesh, outputMeshPath))
     {
         ALICEVISION_LOG_ERROR("Failed to save mesh file: \"" << outputMeshPath << "\".");
         return EXIT_FAILURE;

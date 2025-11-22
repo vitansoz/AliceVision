@@ -8,13 +8,24 @@
 
 #include <string>
 #include <cmath>
+#include <ostream>
+
+#include <Eigen/Core>
+#include <aliceVision/stl/hash.hpp>
+
+// #include <geogram/basic/vecg.h>
+namespace GEO {
+template<unsigned int DIM, class T>
+class vecng;
+};
 
 namespace aliceVision {
 
 class Point3d
 {
-public:
-    union {
+  public:
+    union
+    {
         struct
         {
             double x, y, z;
@@ -35,7 +46,7 @@ public:
         y = _y;
         z = _z;
     }
-    
+
     inline Point3d(const double* const p)
     {
         x = p[0];
@@ -51,35 +62,41 @@ public:
         return *this;
     }
 
-    inline bool operator==(const Point3d& param)
+    inline Point3d& operator+=(const Point3d& _p)
     {
-        return (x == param.x) && (y == param.y) && (z == param.z);
+        x += _p.x;
+        y += _p.y;
+        z += _p.z;
+        return *this;
     }
 
-    inline Point3d operator-(const Point3d& _p) const
+    inline Point3d& operator/=(const Point3d& _p)
     {
-        return Point3d(x - _p.x, y - _p.y, z - _p.z);
+        x /= _p.x;
+        y /= _p.y;
+        z /= _p.z;
+        return *this;
     }
 
-    inline Point3d operator-() const
+    inline Point3d& operator/=(double v)
     {
-        return Point3d(-x, -y, -z);
+        x /= v;
+        y /= v;
+        z /= v;
+        return *this;
     }
 
-    inline Point3d operator+(const Point3d& _p) const
-    {
-        return Point3d(x + _p.x, y + _p.y, z + _p.z);
-    }
+    inline bool operator==(const Point3d& param) const { return (x == param.x) && (y == param.y) && (z == param.z); }
 
-    inline Point3d operator*(const double d) const
-    {
-        return Point3d(x * d, y * d, z * d);
-    }
+    inline Point3d operator-(const Point3d& _p) const { return Point3d(x - _p.x, y - _p.y, z - _p.z); }
 
-    inline Point3d operator/(const double d) const
-    {
-        return Point3d(x / d, y / d, z / d);
-    }
+    inline Point3d operator-() const { return Point3d(-x, -y, -z); }
+
+    inline Point3d operator+(const Point3d& _p) const { return Point3d(x + _p.x, y + _p.y, z + _p.z); }
+
+    inline Point3d operator*(const double d) const { return Point3d(x * d, y * d, z * d); }
+
+    inline Point3d operator/(const double d) const { return Point3d(x / d, y / d, z / d); }
 
     inline Point3d normalize() const
     {
@@ -90,7 +107,7 @@ public:
     inline double size() const
     {
         double d = x * x + y * y + z * z;
-        if(d == 0.0)
+        if (d == 0.0)
         {
             return 0.0;
         }
@@ -98,20 +115,24 @@ public:
         return sqrt(d);
     }
 
-    inline double size2() const
+    inline double size2() const { return x * x + y * y + z * z; }
+
+    template<class T>
+    operator GEO::vecng<3, T>() const
     {
-        return x * x + y * y + z * z;
+        return GEO::vecng<3, T>(x, y, z);
     }
+
+    friend double dist(const Point3d& p1, const Point3d& p2);
 
     friend double dot(const Point3d& p1, const Point3d& p2);
     friend Point3d cross(const Point3d& a, const Point3d& b);
-    friend Point3d proj(Point3d& e, Point3d& a);
+    friend Point3d proj(const Point3d& e, const Point3d& a);
 };
 
-inline double dot(const Point3d& p1, const Point3d& p2)
-{
-    return p1.x * p2.x + p1.y * p2.y + p1.z * p2.z;
-}
+inline double dist(const Point3d& p1, const Point3d& p2) { return (p1 - p2).size(); }
+
+inline double dot(const Point3d& p1, const Point3d& p2) { return p1.x * p2.x + p1.y * p2.y + p1.z * p2.z; }
 
 inline Point3d cross(const Point3d& a, const Point3d& b)
 {
@@ -123,9 +144,43 @@ inline Point3d cross(const Point3d& a, const Point3d& b)
     return vc;
 }
 
-inline Point3d proj(Point3d& e, Point3d& a)
+inline Point3d proj(const Point3d& e, const Point3d& a) { return e * (dot(e, a) / dot(e, e)); }
+
+inline double tripleProduct(const Point3d& a, const Point3d& b, const Point3d& c) { return dot(a, cross(b, c)); }
+
+/**
+ * @brief Solid angle of a tetrahedron. It takes 3 vectors OA, OB, AC to define the solid angle define by the triangle ABC around the point O.
+ * @see The Solid Angle of a Plane Triangle, A. Van Oosterom, J. Strackee, 1983. DOI: 10.1109/TBME.1983.325207
+ */
+inline double tetrahedronSolidAngle(const Point3d& oa, const Point3d& ob, const Point3d& oc)
 {
-    return e * (dot(e, a) / dot(e, e));
+    const double a = oa.size();
+    const double b = ob.size();
+    const double c = oc.size();
+
+    const double nom = tripleProduct(oa, ob, oc);
+    const double den = (a * b * c + dot(oa, ob) * c + dot(oa, oc) * b + dot(ob, oc) * a);
+    return std::abs(std::atan2(nom, den) * 2.0);
 }
 
-} // namespace aliceVision
+inline std::ostream& operator<<(std::ostream& stream, const Point3d& p)
+{
+    stream << p.x << "," << p.y << "," << p.z;
+    return stream;
+}
+
+inline Eigen::Matrix<double, 3, 1> toEigen(const Point3d& v) { return Eigen::Matrix<double, 3, 1>(v.m); }
+
+struct Point3dHash
+{
+    std::size_t operator()(const Point3d & p) const noexcept
+    {
+        std::size_t seed = 0;
+        stl::hash_combine(seed, p.x);
+        stl::hash_combine(seed, p.y);
+        stl::hash_combine(seed, p.z);
+        return seed;
+    }
+};
+
+}  // namespace aliceVision

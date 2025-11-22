@@ -4,33 +4,41 @@
 // v. 2.0. If a copy of the MPL was not distributed with this file,
 // You can obtain one at https://mozilla.org/MPL/2.0/.
 
+#include <aliceVision/image/Rgb.hpp>
 #include <aliceVision/sfmData/SfMData.hpp>
 #include <aliceVision/sfmData/colorize.hpp>
 #include <aliceVision/sfmDataIO/sfmDataIO.hpp>
-#include <aliceVision/fuseCut/LargeScale.hpp>
-#include <aliceVision/fuseCut/ReconstructionPlan.hpp>
-#include <aliceVision/fuseCut/DelaunayGraphCut.hpp>
+#include <aliceVision/fuseCut/Fuser.hpp>
+#include <aliceVision/fuseCut/BoundingBox.hpp>
+#include <aliceVision/fuseCut/PointCloud.hpp>
 #include <aliceVision/mesh/meshPostProcessing.hpp>
 #include <aliceVision/mvsData/Point3d.hpp>
 #include <aliceVision/mvsData/StaticVector.hpp>
 #include <aliceVision/mvsUtils/common.hpp>
 #include <aliceVision/mvsUtils/MultiViewParams.hpp>
 #include <aliceVision/mvsUtils/fileIO.hpp>
-#include <aliceVision/system/cmdline.hpp>
+#include <aliceVision/cmdline/cmdline.hpp>
 #include <aliceVision/system/Logger.hpp>
+#include <aliceVision/system/main.hpp>
 #include <aliceVision/system/Timer.hpp>
+#include <aliceVision/fuseCut/GraphFiller.hpp>
+#include <aliceVision/fuseCut/Mesher.hpp>
+
+#include <Eigen/Geometry>
 
 #include <boost/program_options.hpp>
-#include <boost/filesystem.hpp>
+
+#include <filesystem>
+#include <cmath>
 
 // These constants define the current software version.
 // They must be updated when the command line is changed.
-#define ALICEVISION_SOFTWARE_VERSION_MAJOR 3
+#define ALICEVISION_SOFTWARE_VERSION_MAJOR 4
 #define ALICEVISION_SOFTWARE_VERSION_MINOR 0
 
 using namespace aliceVision;
 
-namespace fs = boost::filesystem;
+namespace fs = std::filesystem;
 namespace po = boost::program_options;
 
 enum EPartitioningMode
@@ -42,18 +50,17 @@ enum EPartitioningMode
 
 EPartitioningMode EPartitioning_stringToEnum(const std::string& s)
 {
-    if(s == "singleBlock")
+    if (s == "singleBlock")
         return ePartitioningSingleBlock;
-    if(s == "auto")
+    if (s == "auto")
         return ePartitioningAuto;
     return ePartitioningUndefined;
 }
 
 inline std::istream& operator>>(std::istream& in, EPartitioningMode& out_mode)
 {
-    std::string s;
-    in >> s;
-    out_mode = EPartitioning_stringToEnum(s);
+    std::string token(std::istreambuf_iterator<char>(in), {});
+    out_mode = EPartitioning_stringToEnum(token);
     return in;
 }
 
@@ -61,69 +68,78 @@ enum ERepartitionMode
 {
     eRepartitionUndefined = 0,
     eRepartitionMultiResolution = 1,
-    eRepartitionRegularGrid = 2,
 };
 
 ERepartitionMode ERepartitionMode_stringToEnum(const std::string& s)
 {
-    if(s == "multiResolution")
+    if (s == "multiResolution")
         return eRepartitionMultiResolution;
-    if(s == "regularGrid")
-        return eRepartitionRegularGrid;
     return eRepartitionUndefined;
 }
 
 inline std::istream& operator>>(std::istream& in, ERepartitionMode& out_mode)
 {
-    std::string s;
-    in >> s;
-    out_mode = ERepartitionMode_stringToEnum(s);
+    std::string token(std::istreambuf_iterator<char>(in), {});
+    out_mode = ERepartitionMode_stringToEnum(token);
     return in;
 }
 
-void exportPointCloud(const std::string& path,
-                      const mvsUtils::MultiViewParams& mp,
-                      const sfmData::SfMData& sfmData,
-                      const std::vector<Point3d>& vertices,
-                      const StaticVector<StaticVector<int>*> cams)
+/// Create a dense SfMData based on reference \p sfmData,
+/// using \p vertices as landmarks and \p ptCams as observations
+void createDenseSfMData(const sfmData::SfMData& sfmData,
+                        const mvsUtils::MultiViewParams& mp,
+                        const std::vector<Point3d>& vertices,
+                        const StaticVector<StaticVector<int>>& ptsCams,
+                        sfmData::SfMData& outSfmData)
 {
-  sfmData::SfMData densePointCloud = sfmData;
-  densePointCloud.getLandmarks().clear();
-  int outputIndex = 0;
+    outSfmData = sfmData;
+    outSfmData.getLandmarks().clear();
 
-  for(int i = 0; i < vertices.size(); ++i)
-  {
-    const Point3d& point = vertices.at(i);
-
-    if(!cams[i]->empty())
+    const double unknownScale = 0.0;
+    for (std::size_t i = 0; i < vertices.size(); ++i)
     {
-      const Vec3 pt3D(point.x, point.y, point.z);
-      sfmData::Landmark landmark(pt3D, feature::EImageDescriberType::UNKNOWN);
-      for(int cam : *(cams[i]))
-      {
-        const sfmData::View& view = sfmData.getView(mp.getViewId(cam));
-        const camera::IntrinsicBase* intrinsicPtr = sfmData.getIntrinsicPtr(view.getIntrinsicId());
-        const sfmData::Observation observation(intrinsicPtr->project(sfmData.getPose(view).getTransform(), pt3D, true), UndefinedIndexT); // apply distortion
-        landmark.observations[view.getViewId()] = observation;
-      }
-      densePointCloud.getLandmarks()[outputIndex] = landmark;
-      ++outputIndex;
+        const Point3d& point = vertices.at(i);
+        const Vec3 pt3D(point.x, point.y, point.z);
+        sfmData::Landmark landmark(pt3D, feature::EImageDescriberType::UNKNOWN);
+        // set landmark observations from ptsCams if any
+        if (!ptsCams[i].empty())
+        {
+            for (int cam : ptsCams[i])
+            {
+                const sfmData::View& view = sfmData.getView(mp.getViewId(cam));
+                const camera::IntrinsicBase* intrinsicPtr = sfmData.getIntrinsicPtr(view.getIntrinsicId());
+                const sfmData::Observation observation(intrinsicPtr->transformProject(sfmData.getPose(view).getTransform(), pt3D.homogeneous(), true),
+                                                       UndefinedIndexT,
+                                                       unknownScale);  // apply distortion
+                landmark.getObservations()[view.getViewId()] = observation;
+            }
+        }
+        outSfmData.getLandmarks()[i] = landmark;
     }
-  }
-  sfmData::colorizeTracks(densePointCloud);
-  sfmDataIO::Save(densePointCloud, path, sfmDataIO::ESfMData::ALL_DENSE);
 }
 
-int main(int argc, char* argv[])
+/// Remove all landmarks without observations from \p sfmData.
+void removeLandmarksWithoutObservations(sfmData::SfMData& sfmData)
+{
+    auto& landmarks = sfmData.getLandmarks();
+    for (auto it = landmarks.begin(); it != landmarks.end();)
+    {
+        if (it->second.getObservations().empty())
+            it = landmarks.erase(it);
+        else
+            ++it;
+    }
+}
+
+
+int aliceVision_main(int argc, char* argv[])
 {
     system::Timer timer;
 
-    std::string verboseLevel = system::EVerboseLevel_enumToString(system::Logger::getDefaultVerboseLevel());
     std::string sfmDataFilename;
     std::string outputMesh;
     std::string outputDensePointCloud;
     std::string depthMapsFolder;
-    std::string depthMapsFilterFolder;
     EPartitioningMode partitioningMode = ePartitioningSingleBlock;
     ERepartitionMode repartitionMode = eRepartitionMultiResolution;
     std::size_t estimateSpaceMinObservations = 3;
@@ -134,152 +150,182 @@ int main(int argc, char* argv[])
     bool estimateSpaceFromSfM = true;
     bool addLandmarksToTheDensePointCloud = false;
     bool saveRawDensePointCloud = false;
+    bool colorizeOutput = false;
+    bool voteFilteringForWeaklySupportedSurfaces = true;
+    int invertTetrahedronBasedOnNeighborsNbIterations = 10;
+    double minSolidAngleRatio = 0.2;
+    int nbSolidAngleFilteringIterations = 2;
+    unsigned int seed = 0;
+    fuseCut::BoundingBox boundingBox;
 
-    fuseCut::FuseParams fuseParams;
+    fuseCut::PointCloudFuseParams fuseParams;
 
-    po::options_description allParams("AliceVision meshing");
+    int helperPointsGridSize = 10;
+    int densifyNbFront = 0;
+    int densifyNbBack = 0;
+    double densifyScale = 1.0;
+    double nPixelSizeBehind = 4.0;
+    double fullWeight = 1.0;
+    bool exportDebugTetrahedralization = false;
+    int maxNbConnectedHelperPoints = 50;
 
+    // clang-format off
     po::options_description requiredParams("Required parameters");
     requiredParams.add_options()
         ("input,i", po::value<std::string>(&sfmDataFilename)->required(),
-          "SfMData file.")
+         "SfMData file.")
         ("output,o", po::value<std::string>(&outputDensePointCloud)->required(),
-          "Output Dense SfMData file.")
+         "Output Dense SfMData file.")
         ("outputMesh,o", po::value<std::string>(&outputMesh)->required(),
-          "Output mesh (OBJ file format).");
+         "Output mesh.");
 
     po::options_description optionalParams("Optional parameters");
     optionalParams.add_options()
         ("depthMapsFolder", po::value<std::string>(&depthMapsFolder),
-            "Input depth maps folder.")
-        ("depthMapsFilterFolder", po::value<std::string>(&depthMapsFilterFolder),
-            "Input filtered depth maps folder.")
+         "Input filtered depth maps folder.")
+        ("boundingBox", po::value<fuseCut::BoundingBox>(&boundingBox),
+         "Specifies a bounding box to reconstruct: position, rotation (Euler ZXY) and scale.")
         ("maxInputPoints", po::value<int>(&fuseParams.maxInputPoints)->default_value(fuseParams.maxInputPoints),
-            "Max input points loaded from images.")
+         "Maximum number of input points loaded from images.")
         ("maxPoints", po::value<int>(&fuseParams.maxPoints)->default_value(fuseParams.maxPoints),
-            "Max points at the end of the depth maps fusion.")
+         "Maximum number of points at the end of the depth maps fusion.")
         ("maxPointsPerVoxel", po::value<int>(&maxPtsPerVoxel)->default_value(maxPtsPerVoxel),
-            "Max points per voxel.")
+         "Maximum number of points per voxel.")
         ("minStep", po::value<int>(&fuseParams.minStep)->default_value(fuseParams.minStep),
-            "The step used to load depth values from depth maps is computed from maxInputPts. Here we define the minimal value for this step, "
-            "so on small datasets we will not spend too much time at the beginning loading all depth values.")
+         "The step used to load depth values from depth maps is computed from maxInputPts. "
+         "Here we define the minimal value for this step, so on small datasets we will not spend too much time at the "
+         "beginning loading all depth values.")
         ("simFactor", po::value<float>(&fuseParams.simFactor)->default_value(fuseParams.simFactor),
-            "simFactor")
+         "simFactor.")
         ("angleFactor", po::value<float>(&fuseParams.angleFactor)->default_value(fuseParams.angleFactor),
-            "angleFactor")
+         "angleFactor.")
+        ("minVis", po::value<int>(&fuseParams.minVis)->default_value(fuseParams.minVis),
+         "Filter points based on their number of observations.")
         ("partitioning", po::value<EPartitioningMode>(&partitioningMode)->default_value(partitioningMode),
-            "Partitioning: 'singleBlock' or 'auto'.")
+         "Partitioning: 'singleBlock' or 'auto'.")
         ("repartition", po::value<ERepartitionMode>(&repartitionMode)->default_value(repartitionMode),
-            "Repartition: 'multiResolution' or 'regularGrid'.")
+         "Repartition: 'multiResolution' or 'regularGrid'.")
         ("estimateSpaceFromSfM", po::value<bool>(&estimateSpaceFromSfM)->default_value(estimateSpaceFromSfM),
-            "Estimate the 3d space from the SfM.")
+         "Estimate the 3d space from the SfM.")
         ("addLandmarksToTheDensePointCloud", po::value<bool>(&addLandmarksToTheDensePointCloud)->default_value(addLandmarksToTheDensePointCloud),
-            "Add SfM Landmarks into the dense point cloud (created from depth maps). If only the SfM is provided in input, SfM landmarks will be used regardless of this option.");
+         "Add SfM Landmarks into the dense point cloud (created from depth maps). "
+         "If only the SfM is provided in input, SfM landmarks will be used regardless of this option.")
+        ("colorizeOutput", po::value<bool>(&colorizeOutput)->default_value(colorizeOutput),
+         "Whether to colorize output dense point cloud and mesh.");
 
     po::options_description advancedParams("Advanced parameters");
     advancedParams.add_options()
         ("universePercentile", po::value<double>(&universePercentile)->default_value(universePercentile),
-            "universe percentile")
+         "Universe percentile.")
         ("estimateSpaceMinObservations", po::value<std::size_t>(&estimateSpaceMinObservations)->default_value(estimateSpaceMinObservations),
-            "Minimum number of observations for SfM space estimation.")
+         "Minimum number of observations for SfM space estimation.")
         ("estimateSpaceMinObservationAngle", po::value<float>(&estimateSpaceMinObservationAngle)->default_value(estimateSpaceMinObservationAngle),
-            "Minimum angle between two observations for SfM space estimation.")
+         "Minimum angle between two observations for SfM space estimation.")
         ("pixSizeMarginInitCoef", po::value<double>(&fuseParams.pixSizeMarginInitCoef)->default_value(fuseParams.pixSizeMarginInitCoef),
-            "pixSizeMarginInitCoef")
+         "pixSizeMarginInitCoef.")
         ("pixSizeMarginFinalCoef", po::value<double>(&fuseParams.pixSizeMarginFinalCoef)->default_value(fuseParams.pixSizeMarginFinalCoef),
-            "pixSizeMarginFinalCoef")
+         "pixSizeMarginFinalCoef.")
         ("voteMarginFactor", po::value<float>(&fuseParams.voteMarginFactor)->default_value(fuseParams.voteMarginFactor),
-            "voteMarginFactor")
+         "voteMarginFactor.")
         ("contributeMarginFactor", po::value<float>(&fuseParams.contributeMarginFactor)->default_value(fuseParams.contributeMarginFactor),
-            "contributeMarginFactor")
+         "contributeMarginFactor.")
         ("simGaussianSizeInit", po::value<float>(&fuseParams.simGaussianSizeInit)->default_value(fuseParams.simGaussianSizeInit),
-            "simGaussianSizeInit")
+         "simGaussianSizeInit.")
         ("simGaussianSize", po::value<float>(&fuseParams.simGaussianSize)->default_value(fuseParams.simGaussianSize),
-            "simGaussianSize")
+         "simGaussianSize.")
         ("minAngleThreshold", po::value<double>(&fuseParams.minAngleThreshold)->default_value(fuseParams.minAngleThreshold),
-            "minAngleThreshold")
+         "minAngleThreshold.")
         ("refineFuse", po::value<bool>(&fuseParams.refineFuse)->default_value(fuseParams.refineFuse),
-            "refineFuse")
+         "refineFuse.")
+        ("helperPointsGridSize", po::value<int>(&helperPointsGridSize)->default_value(helperPointsGridSize),
+         "Helper points grid size.")
+        ("densifyNbFront", po::value<int>(&densifyNbFront)->default_value(densifyNbFront),
+         "Number of points in front of the vertices to densify the scene.")
+        ("densifyNbBack", po::value<int>(&densifyNbBack)->default_value(densifyNbBack),
+         "Number of points behind the vertices to densify the scene.")
+        ("densifyScale", po::value<double>(&densifyScale)->default_value(densifyScale),
+         "Scale between points used to densify the scene.")
+        ("maskHelperPointsWeight", po::value<float>(&fuseParams.maskHelperPointsWeight)->default_value(fuseParams.maskHelperPointsWeight),
+         "Mask helper points weight. Set to 0 to disable it.")
+        ("maskBorderSize", po::value<int>(&fuseParams.maskBorderSize)->default_value(fuseParams.maskBorderSize),
+         "How many pixels on mask borders? 1 by default.")
+        ("nPixelSizeBehind", po::value<double>(&nPixelSizeBehind)->default_value(nPixelSizeBehind),
+         "Number of pixel size units to vote behind the vertex with FULL status.")
+        ("fullWeight", po::value<double>(&fullWeight)->default_value(fullWeight),
+         "Weighting of the FULL cells.")
         ("saveRawDensePointCloud", po::value<bool>(&saveRawDensePointCloud)->default_value(saveRawDensePointCloud),
-            "Save dense point cloud before cut and filtering.");
+         "Save dense point cloud before cut and filtering.")
+        ("voteFilteringForWeaklySupportedSurfaces", po::value<bool>(&voteFilteringForWeaklySupportedSurfaces)->default_value(voteFilteringForWeaklySupportedSurfaces),
+         "Improve support of weakly supported surfaces with a tetrahedra fullness score filtering.")
+        ("invertTetrahedronBasedOnNeighborsNbIterations", po::value<int>(&invertTetrahedronBasedOnNeighborsNbIterations)->default_value(invertTetrahedronBasedOnNeighborsNbIterations),
+         "Invert cells status around surface to improve smoothness.")
+        ("minSolidAngleRatio", po::value<double>(&minSolidAngleRatio)->default_value(minSolidAngleRatio),
+         "Filter cells status on surface around vertices to improve smoothness using solid angle ratio between full/empty parts.")
+        ("nbSolidAngleFilteringIterations", po::value<int>(&nbSolidAngleFilteringIterations)->default_value(nbSolidAngleFilteringIterations),
+         "Number of iterations to filter the status cells based on solid angle ratio.")
+        ("maxNbConnectedHelperPoints", po::value<int>(&maxNbConnectedHelperPoints)->default_value(maxNbConnectedHelperPoints),
+         "Maximum number of connected helper points before we remove them.")
+        ("exportDebugTetrahedralization", po::value<bool>(&exportDebugTetrahedralization)->default_value(exportDebugTetrahedralization),
+         "Export debug cells score as tetrahedral mesh. WARNING: could create huge meshes, only use on very small datasets.")
+        ("seed", po::value<unsigned int>(&seed)->default_value(seed),
+         "Seed used in random processes. (0 to use a random seed).");
+    // clang-format on
 
-    po::options_description logParams("Log parameters");
-    logParams.add_options()
-      ("verboseLevel,v", po::value<std::string>(&verboseLevel)->default_value(verboseLevel),
-        "verbosity level (fatal, error, warning, info, debug, trace).");
-
-    allParams.add(requiredParams).add(optionalParams).add(advancedParams).add(logParams);
-
-    po::variables_map vm;
-
-    try
+    CmdLine cmdline("AliceVision meshing");
+    cmdline.add(requiredParams);
+    cmdline.add(optionalParams);
+    cmdline.add(advancedParams);
+    if (!cmdline.execute(argc, argv))
     {
-      po::store(po::parse_command_line(argc, argv, allParams), vm);
-
-      if(vm.count("help") || (argc == 1))
-      {
-        ALICEVISION_COUT(allParams);
-        return EXIT_SUCCESS;
-      }
-
-      po::notify(vm);
-    }
-    catch(boost::program_options::required_option& e)
-    {
-      ALICEVISION_CERR("ERROR: " << e.what() << std::endl);
-      ALICEVISION_COUT("Usage:\n\n" << allParams);
-      return EXIT_FAILURE;
-    }
-    catch(boost::program_options::error& e)
-    {
-      ALICEVISION_CERR("ERROR: " << e.what() << std::endl);
-      ALICEVISION_COUT("Usage:\n\n" << allParams);
-      return EXIT_FAILURE;
-    }
-
-    ALICEVISION_COUT("Program called with the following parameters:");
-    ALICEVISION_COUT(vm);
-
-    // set verbose level
-    system::Logger::get()->setLogLevel(verboseLevel);
-
-    if(depthMapsFolder.empty() || depthMapsFilterFolder.empty())
-    {
-      if(depthMapsFolder.empty() &&
-         depthMapsFilterFolder.empty() &&
-         repartitionMode == eRepartitionMultiResolution &&
-         partitioningMode == ePartitioningSingleBlock)
-      {
-        meshingFromDepthMaps = false;
-        addLandmarksToTheDensePointCloud = true;
-      }
-      else
-      {
-        ALICEVISION_LOG_ERROR("Invalid input options:\n"
-                              "- Meshing from depth maps require --depthMapsFolder and --depthMapsFilterFolder options.\n"
-                              "- Meshing from SfM require option --partitioning set to 'singleBlock' and option --repartition set to 'multiResolution'.");
         return EXIT_FAILURE;
-      }
+    }
+
+    if (depthMapsFolder.empty())
+    {
+        if (depthMapsFolder.empty() && repartitionMode == eRepartitionMultiResolution && partitioningMode == ePartitioningSingleBlock)
+        {
+            meshingFromDepthMaps = false;
+            addLandmarksToTheDensePointCloud = true;
+        }
+        else
+        {
+            ALICEVISION_LOG_ERROR(
+              "Invalid input options:\n"
+              "- Meshing from depth maps require --depthMapsFolder option.\n"
+              "- Meshing from SfM require option --partitioning set to 'singleBlock' and option --repartition set to 'multiResolution'.");
+            return EXIT_FAILURE;
+        }
     }
 
     // read the input SfM scene
     sfmData::SfMData sfmData;
-    if(!sfmDataIO::Load(sfmData, sfmDataFilename, sfmDataIO::ESfMData::ALL))
+    if (!sfmDataIO::load(sfmData, sfmDataFilename, sfmDataIO::ESfMData::ALL))
     {
-      ALICEVISION_LOG_ERROR("The input SfMData file '" << sfmDataFilename << "' cannot be read.");
-      return EXIT_FAILURE;
+        ALICEVISION_LOG_ERROR("The input SfMData file '" << sfmDataFilename << "' cannot be read.");
+        return EXIT_FAILURE;
     }
 
     // initialization
-    mvsUtils::MultiViewParams mp(sfmData, "", depthMapsFolder, depthMapsFilterFolder, meshingFromDepthMaps);
+    mvsUtils::MultiViewParams mp(sfmData, "", "", depthMapsFolder, meshingFromDepthMaps ? mvsUtils::EFileType::depthMap : mvsUtils::EFileType::none);
 
     mp.userParams.put("LargeScale.universePercentile", universePercentile);
+    mp.userParams.put("LargeScale.helperPointsGridSize", helperPointsGridSize);
+    mp.userParams.put("LargeScale.densifyNbFront", densifyNbFront);
+    mp.userParams.put("LargeScale.densifyNbBack", densifyNbBack);
+    mp.userParams.put("LargeScale.densifyScale", densifyScale);
+    mp.userParams.put("delaunaycut.seed", seed);
+    mp.userParams.put("delaunaycut.nPixelSizeBehind", nPixelSizeBehind);
+    mp.userParams.put("delaunaycut.fullWeight", fullWeight);
+    mp.userParams.put("delaunaycut.voteFilteringForWeaklySupportedSurfaces", voteFilteringForWeaklySupportedSurfaces);
+    mp.userParams.put("hallucinationsFiltering.invertTetrahedronBasedOnNeighborsNbIterations", invertTetrahedronBasedOnNeighborsNbIterations);
+    mp.userParams.put("hallucinationsFiltering.minSolidAngleRatio", minSolidAngleRatio);
+    mp.userParams.put("hallucinationsFiltering.nbSolidAngleFilteringIterations", nbSolidAngleFilteringIterations);
 
     int ocTreeDim = mp.userParams.get<int>("LargeScale.gridLevel0", 1024);
     const auto baseDir = mp.userParams.get<std::string>("LargeScale.baseDirName", "root01024");
 
     fs::path outDirectory = fs::path(outputMesh).parent_path();
-    if(!fs::is_directory(outDirectory))
+    if (!fs::is_directory(outDirectory))
         fs::create_directory(outDirectory);
 
     fs::path tmpDirectory = outDirectory / "tmp";
@@ -287,140 +333,14 @@ int main(int argc, char* argv[])
     ALICEVISION_LOG_WARNING("repartitionMode: " << repartitionMode);
     ALICEVISION_LOG_WARNING("partitioningMode: " << partitioningMode);
 
-    switch(repartitionMode)
+    mesh::Mesh* mesh = nullptr;
+    StaticVector<StaticVector<int>> ptsCams;
+
+    switch (repartitionMode)
     {
-        case eRepartitionRegularGrid:
-        {
-            switch(partitioningMode)
-            {
-                case ePartitioningAuto:
-                {
-                    ALICEVISION_LOG_INFO("Meshing mode: regular Grid, partitioning: auto.");
-                    fuseCut::LargeScale lsbase(&mp, tmpDirectory.string() + "/");
-                    lsbase.generateSpace(maxPtsPerVoxel, ocTreeDim, true);
-                    std::string voxelsArrayFileName = lsbase.spaceFolderName + "hexahsToReconstruct.bin";
-                    StaticVector<Point3d>* voxelsArray = nullptr;
-                    if(fs::exists(voxelsArrayFileName))
-                    {
-                        // If already computed reload it.
-                        ALICEVISION_LOG_INFO("Voxels array already computed, reload from file: " << voxelsArrayFileName);
-                        voxelsArray = loadArrayFromFile<Point3d>(voxelsArrayFileName);
-                    }
-                    else
-                    {
-                        ALICEVISION_LOG_INFO("Compute voxels array.");
-                        fuseCut::ReconstructionPlan rp(lsbase.dimensions, &lsbase.space[0], lsbase.mp, lsbase.spaceVoxelsFolderName);
-                        voxelsArray = rp.computeReconstructionPlanBinSearch(fuseParams.maxPoints);
-                        saveArrayToFile<Point3d>(voxelsArrayFileName, voxelsArray);
-                    }
-                    fuseCut::reconstructSpaceAccordingToVoxelsArray(voxelsArrayFileName, &lsbase);
-                    // Join meshes
-                    mesh::Mesh* mesh = fuseCut::joinMeshes(voxelsArrayFileName, &lsbase);
-
-                    if(mesh->pts->empty() || mesh->tris->empty())
-                      throw std::runtime_error("Empty mesh");
-
-                    ALICEVISION_LOG_INFO("Saving joined meshes...");
-
-                    fs::path spaceBinFileName = outDirectory/"denseReconstruction.bin";
-                    mesh->saveToBin(spaceBinFileName.string());
-
-                    // Export joined mesh to obj
-                    mesh->saveToObj(outputMesh);
-
-                    delete mesh;
-
-                    // Join ptsCams
-                    StaticVector<StaticVector<int>*>* ptsCams = fuseCut::loadLargeScalePtsCams(lsbase.getRecsDirs(voxelsArray));
-                    saveArrayOfArraysToFile<int>((outDirectory/"meshPtsCamsFromDGC.bin").string(), ptsCams);
-                    deleteArrayOfArrays<int>(&ptsCams);
-                    break;
-                }
-                case ePartitioningSingleBlock:
-                {
-                    ALICEVISION_LOG_INFO("Meshing mode: regular Grid, partitioning: single block.");
-                    fuseCut::LargeScale ls0(&mp, tmpDirectory.string() + "/");
-                    ls0.generateSpace(maxPtsPerVoxel, ocTreeDim, true);
-                    unsigned long ntracks = std::numeric_limits<unsigned long>::max();
-                    while(ntracks > fuseParams.maxPoints)
-                    {
-                        fs::path dirName = outDirectory/("LargeScaleMaxPts" + mvsUtils::num2strFourDecimal(ocTreeDim));
-                        fuseCut::LargeScale* ls = ls0.cloneSpaceIfDoesNotExists(ocTreeDim, dirName.string() + "/");
-                        fuseCut::VoxelsGrid vg(ls->dimensions, &ls->space[0], ls->mp, ls->spaceVoxelsFolderName);
-                        ntracks = vg.getNTracks();
-                        delete ls;
-                        ALICEVISION_LOG_INFO("Number of track candidates: " << ntracks);
-                        if(ntracks > fuseParams.maxPoints)
-                        {
-                            ALICEVISION_LOG_INFO("ocTreeDim: " << ocTreeDim);
-                            double t = (double)ntracks / (double)fuseParams.maxPoints;
-                            ALICEVISION_LOG_INFO("downsample: " << ((t < 2.0) ? "slow" : "fast"));
-                            ocTreeDim = (t < 2.0) ? ocTreeDim-100 : ocTreeDim*0.5;
-                        }
-                    }
-                    ALICEVISION_LOG_INFO("Number of tracks: " << ntracks);
-                    ALICEVISION_LOG_INFO("ocTreeDim: " << ocTreeDim);
-                    fs::path dirName = outDirectory/("LargeScaleMaxPts" + mvsUtils::num2strFourDecimal(ocTreeDim));
-                    fuseCut::LargeScale lsbase(&mp, dirName.string()+"/");
-                    lsbase.loadSpaceFromFile();
-                    fuseCut::ReconstructionPlan rp(lsbase.dimensions, &lsbase.space[0], lsbase.mp, lsbase.spaceVoxelsFolderName);
-
-                    StaticVector<int> voxelNeighs;
-                    voxelNeighs.resize(rp.voxels->size() / 8);
-                    ALICEVISION_LOG_INFO("voxelNeighs.size(): " << voxelNeighs.size());
-                    for(int i = 0; i < voxelNeighs.size(); ++i)
-                        voxelNeighs[i] = i;
-
-                    fuseCut::DelaunayGraphCut delaunayGC(lsbase.mp);
-                    Point3d* hexah = &lsbase.space[0];
-
-                    StaticVector<int> cams;
-                    if(hexah)
-                    {
-                      cams = mp.findCamsWhichIntersectsHexahedron(hexah);
-                    }
-                    else
-                    {
-                      cams.resize(mp.getNbCameras());
-                      for(int i = 0; i < cams.size(); ++i)
-                          cams[i] = i;
-                    }
-
-                    if(cams.size() < 1)
-                        throw std::logic_error("No camera to make the reconstruction");
-
-                    delaunayGC.createDensePointCloudFromPrecomputedDensePoints(hexah, cams, &voxelNeighs, (fuseCut::VoxelsGrid*)&rp);
-                    delaunayGC.createGraphCut(hexah, cams, (fuseCut::VoxelsGrid*)&rp, outDirectory.string()+"/", lsbase.getSpaceCamsTracksDir(), false, lsbase.getSpaceSteps());
-                    delaunayGC.graphCutPostProcessing();
-
-                    // Save mesh as .bin and .obj
-                    mesh::Mesh* mesh = delaunayGC.createMesh();
-                    if(mesh->pts->empty() || mesh->tris->empty())
-                      throw std::runtime_error("Empty mesh");
-
-                    StaticVector<StaticVector<int>*>* ptsCams = delaunayGC.createPtsCams();
-
-                    StaticVector<Point3d>* hexahsToExcludeFromResultingMesh = nullptr;
-                    mesh::meshPostProcessing(mesh, ptsCams, mp, outDirectory.string()+"/", hexahsToExcludeFromResultingMesh, hexah);
-                    mesh->saveToBin((outDirectory/"denseReconstruction.bin").string());
-
-                    saveArrayOfArraysToFile<int>((outDirectory/"meshPtsCamsFromDGC.bin").string(), ptsCams);
-                    deleteArrayOfArrays<int>(&ptsCams);
-
-                    mesh->saveToObj(outputMesh);
-
-                    delete mesh;
-                    break;
-                }
-                case ePartitioningUndefined:
-                default:
-                    throw std::invalid_argument("Partitioning mode is not defined");
-            }
-            break;
-        }
         case eRepartitionMultiResolution:
         {
-            switch(partitioningMode)
+            switch (partitioningMode)
             {
                 case ePartitioningAuto:
                 {
@@ -429,87 +349,83 @@ int main(int argc, char* argv[])
                 case ePartitioningSingleBlock:
                 {
                     ALICEVISION_LOG_INFO("Meshing mode: multi-resolution, partitioning: single block.");
-                    fuseCut::DelaunayGraphCut delaunayGC(&mp);
                     std::array<Point3d, 8> hexah;
 
                     float minPixSize;
-                    fuseCut::Fuser fs(&mp);
+                    fuseCut::Fuser fs(mp);
 
-                    if(meshingFromDepthMaps && !estimateSpaceFromSfM)
-                      fs.divideSpaceFromDepthMaps(&hexah[0], minPixSize);
+                    if (boundingBox.isInitialized())
+                        boundingBox.toHexahedron(&hexah[0]);
+                    else if (meshingFromDepthMaps && (!estimateSpaceFromSfM || sfmData.getLandmarks().empty()))
+                        fs.divideSpaceFromDepthMaps(&hexah[0], minPixSize);
                     else
-                      fs.divideSpaceFromSfM(sfmData, &hexah[0], estimateSpaceMinObservations, estimateSpaceMinObservationAngle);
+                        fs.divideSpaceFromSfM(sfmData, &hexah[0], estimateSpaceMinObservations, estimateSpaceMinObservationAngle);
 
-                    Voxel dimensions = fs.estimateDimensions(&hexah[0], &hexah[0], 0, ocTreeDim, (meshingFromDepthMaps && !estimateSpaceFromSfM) ? nullptr : &sfmData);
-                    StaticVector<Point3d>* voxels = mvsUtils::computeVoxels(&hexah[0], dimensions);
-
-                    StaticVector<int> voxelNeighs;
-                    voxelNeighs.resize(voxels->size() / 8);
-                    ALICEVISION_LOG_INFO("voxelNeighs.size(): " << voxelNeighs.size());
-
-                    for(int i = 0; i < voxelNeighs.size(); ++i)
-                        voxelNeighs[i] = i;
-
-                    Point3d spaceSteps;
                     {
-                        Point3d vx = hexah[1] - hexah[0];
-                        Point3d vy = hexah[3] - hexah[0];
-                        Point3d vz = hexah[4] - hexah[0];
-                        spaceSteps.x = (vx.size() / (double)dimensions.x) / (double)ocTreeDim;
-                        spaceSteps.y = (vy.size() / (double)dimensions.y) / (double)ocTreeDim;
-                        spaceSteps.z = (vz.size() / (double)dimensions.z) / (double)ocTreeDim;
+                        const double length = hexah[0].x - hexah[1].x;
+                        const double width = hexah[0].y - hexah[3].y;
+                        const double height = hexah[0].z - hexah[4].z;
+
+                        ALICEVISION_LOG_INFO("bounding Box : length: " << length << ", width: " << width << ", height: " << height);
+
+                        // Save bounding box
+                        fuseCut::BoundingBox bbox = fuseCut::BoundingBox::fromHexahedron(&hexah[0]);
+                        std::string filename = (outDirectory / "boundingBox.txt").string();
+                        std::ofstream fs(filename, std::ios::out);
+                        if (!fs.is_open())
+                        {
+                            ALICEVISION_LOG_WARNING("Unable to create the bounding box file " << filename);
+                        }
+                        fs << bbox.translation << std::endl;
+                        fs << bbox.rotation << std::endl;
+                        fs << bbox.scale << std::endl;
+                        fs.close();
                     }
 
                     StaticVector<int> cams;
-                    if(meshingFromDepthMaps)
+                    if (meshingFromDepthMaps)
                     {
-                      cams = mp.findCamsWhichIntersectsHexahedron(&hexah[0]);
+                        cams = mp.findCamsWhichIntersectsHexahedron(&hexah[0]);
                     }
                     else
                     {
-                      cams.resize(mp.getNbCameras());
-                      for(int i = 0; i < cams.size(); ++i)
-                          cams[i] = i;
+                        cams.resize(mp.getNbCameras());
+                        for (int i = 0; i < cams.size(); ++i)
+                            cams[i] = i;
                     }
 
-                    if(cams.empty())
+                    if (cams.empty())
                         throw std::logic_error("No camera to make the reconstruction");
 
-                    delaunayGC.createDensePointCloud(&hexah[0], cams, addLandmarksToTheDensePointCloud ? &sfmData : nullptr, meshingFromDepthMaps ? &fuseParams : nullptr);
-                    if(saveRawDensePointCloud)
+                    fuseCut::PointCloud pc(mp);
+                    pc.createDensePointCloud(&hexah[0], cams, addLandmarksToTheDensePointCloud ? &sfmData : nullptr, meshingFromDepthMaps ? &fuseParams : nullptr);
+
+                    fuseCut::Tetrahedralization tetrahedralization(pc.getVertices());
+
+                    if (saveRawDensePointCloud)
                     {
-                      ALICEVISION_LOG_INFO("Save dense point cloud before cut and filtering.");
-                      StaticVector<StaticVector<int>*>* ptsCams = delaunayGC.createPtsCams();
-                      exportPointCloud((outDirectory/"densePointCloud_raw.abc").string(), mp, sfmData, delaunayGC._verticesCoords, *ptsCams);
-                      deleteArrayOfArrays<int>(&ptsCams);
+                        ALICEVISION_LOG_INFO("Save dense point cloud before cut and filtering.");
+                        StaticVector<StaticVector<int>> ptsCams;
+                        pc.createPtsCams(ptsCams);
+                        sfmData::SfMData densePointCloud;
+                        createDenseSfMData(sfmData, mp, pc.getVertices(), ptsCams, densePointCloud);
+                        removeLandmarksWithoutObservations(densePointCloud);
+                        if (colorizeOutput)
+                            sfmData::colorizeTracks(densePointCloud);
+                        sfmDataIO::save(densePointCloud, (outDirectory / "densePointCloud_raw.abc").string(), sfmDataIO::ESfMData::ALL_DENSE);
                     }
 
-                    delaunayGC.createGraphCut(&hexah[0], cams, nullptr, outDirectory.string()+"/", outDirectory.string()+"/SpaceCamsTracks/", false, spaceSteps);
-                    delaunayGC.graphCutPostProcessing();
+                    fuseCut::GraphFiller gfiller(mp, pc, tetrahedralization);
+                    gfiller.build(cams);
+                    gfiller.binarize();
 
-                    // Save mesh as .bin and .obj
-                    mesh::Mesh* mesh = delaunayGC.createMesh();
-                    if(mesh->pts->empty() || mesh->tris->empty())
-                        throw std::runtime_error("Empty mesh");
+                    fuseCut::Mesher mesher(mp, pc, tetrahedralization, gfiller.getCellsStatus());
+                    mesher.graphCutPostProcessing(&hexah[0]);
 
-                    StaticVector<StaticVector<int>*>* ptsCams = delaunayGC.createPtsCams();
+                    mesh = mesher.createMesh(maxNbConnectedHelperPoints);
+                    pc.createPtsCams(ptsCams);
+                    mesh::meshPostProcessing(mesh, ptsCams, mp, outDirectory.string() + "/", nullptr, &hexah[0]);
 
-                    StaticVector<Point3d>* hexahsToExcludeFromResultingMesh = nullptr;
-                    mesh::meshPostProcessing(mesh, ptsCams, mp, outDirectory.string()+"/", hexahsToExcludeFromResultingMesh, &hexah[0]);
-
-                    ALICEVISION_LOG_INFO("Save dense point cloud.");
-                    exportPointCloud(outputDensePointCloud, mp, sfmData, mesh->pts->getData(), *ptsCams);
-
-                    //mesh->saveToBin((outDirectory/"denseReconstruction.bin").string());
-
-                    //saveArrayOfArraysToFile<int>((outDirectory/"meshPtsCamsFromDGC.bin").string(), ptsCams);
-                    deleteArrayOfArrays<int>(&ptsCams);
-                    delete voxels;
-
-                    ALICEVISION_LOG_INFO("Save obj mesh file.");
-                    mesh->saveToObj(outputMesh);
-
-                    delete mesh;
                     break;
                 }
                 case ePartitioningUndefined:
@@ -522,6 +438,43 @@ int main(int argc, char* argv[])
         default:
             throw std::invalid_argument("Repartition mode is not defined");
     }
+
+    // Generate output files:
+    // - dense point-cloud with observations as sfmData
+    // - mesh as .obj
+
+    if (mesh == nullptr || mesh->pts.empty() || mesh->tris.empty())
+        throw std::runtime_error("No valid mesh was generated.");
+
+    if (ptsCams.empty())
+        throw std::runtime_error("Points visibilities data has not been initialized.");
+
+    sfmData::SfMData densePointCloud;
+    createDenseSfMData(sfmData, mp, mesh->pts.getData(), ptsCams, densePointCloud);
+
+    if (colorizeOutput)
+    {
+        sfmData::colorizeTracks(densePointCloud);
+        // colorize output mesh before landmarks filtering
+        // to have a 1:1 mapping between points and mesh vertices
+        const auto& landmarks = densePointCloud.getLandmarks();
+        std::vector<rgb>& colors = mesh->colors();
+        colors.resize(mesh->pts.size(), {0, 0, 0});
+        for (std::size_t i = 0; i < mesh->pts.size(); ++i)
+        {
+            const auto& c = landmarks.at(i).rgb;
+            colors[i] = {c.r(), c.g(), c.b()};
+        }
+    }
+
+    removeLandmarksWithoutObservations(densePointCloud);
+    ALICEVISION_LOG_INFO("Save dense point cloud.");
+    sfmDataIO::save(densePointCloud, outputDensePointCloud, sfmDataIO::ESfMData::ALL_DENSE);
+
+    ALICEVISION_LOG_INFO("Save obj mesh file.");
+    ALICEVISION_LOG_INFO("OUTPUT MESH " << outputMesh);
+    mesh->save(outputMesh);
+    delete mesh;
 
     ALICEVISION_LOG_INFO("Task done in (s): " + std::to_string(timer.elapsed()));
     return EXIT_SUCCESS;

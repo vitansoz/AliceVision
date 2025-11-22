@@ -1,34 +1,67 @@
 ## AliceVision
-## Convertion software
+## Conversion software
 
 # Software PROPERTY FOLDER is 'Software/Convert'
 set(FOLDER_SOFTWARE_CONVERT "Software/Convert")
 
-# Convert SfMData format (from one to another)
-alicevision_add_software(aliceVision_convertSfMFormat
-  SOURCE main_convertSfMFormat.cpp
-  FOLDER ${FOLDER_SOFTWARE_CONVERT}
-  LINKS aliceVision_system
-        aliceVision_feature
-        aliceVision_sfmData
-        aliceVision_sfmDataIO
-        ${Boost_LIBRARIES}
-)
+if (ALICEVISION_BUILD_SFM)
+    # Convert SfMData format (from one to another)
+    alicevision_add_software(aliceVision_convertSfMFormat
+        SOURCE main_convertSfMFormat.cpp
+        FOLDER ${FOLDER_SOFTWARE_CONVERT}
+        LINKS aliceVision_system
+              aliceVision_cmdline
+              aliceVision_feature
+              aliceVision_sfmData
+              aliceVision_sfmDataIO
+              Boost::program_options
+              Boost::system
+    )
 
-# Convert float descriptors to unsigned char
-alicevision_add_software(aliceVision_convertFloatDescriptorToUchar
-  SOURCE main_convertFloatDescriptorToUchar.cpp
-  FOLDER ${FOLDER_SOFTWARE_CONVERT}
-  LINKS aliceVision_localization
-        aliceVision_feature
-        ${Boost_LIBRARIES}
-)
+    if (TARGET E57Format AND ALICEVISION_BUILD_MVS)
+        alicevision_add_software(aliceVision_importE57
+            SOURCE main_importE57.cpp
+            FOLDER ${FOLDER_SOFTWARE_CONVERT}
+            LINKS aliceVision_system
+                  aliceVision_cmdline
+                  aliceVision_feature
+                  aliceVision_sfmData
+                  aliceVision_sfmDataIO
+                  aliceVision_mesh
+                  aliceVision_fuseCut
+                  Boost::program_options
+                  Boost::json
+                  E57Format
+                  nanoflann::nanoflann
+        )
+    endif()
 
-# Convert image to EXR
-alicevision_add_software(aliceVision_convertRAW
-  SOURCE main_convertRAW.cpp
-  FOLDER ${FOLDER_SOFTWARE_CONVERT}
-  LINKS aliceVision_system
-        aliceVision_image
-        ${Boost_LIBRARIES}
-)
+    # Convert Distortion format (from one to another)
+    alicevision_add_software(aliceVision_convertDistortion
+        SOURCE main_convertDistortion.cpp
+        FOLDER ${FOLDER_SOFTWARE_CONVERT}
+        LINKS aliceVision_system
+              aliceVision_cmdline
+              aliceVision_feature
+              aliceVision_sfmData
+              aliceVision_sfmDataIO
+              aliceVision_calibration
+              Boost::program_options
+              Boost::system
+    )
+
+endif() # ALICEVISION_BUILD_SFM
+
+
+if (ALICEVISION_BUILD_MVS)
+    # Merge two meshes
+    alicevision_add_software(aliceVision_convertMesh
+        SOURCE main_convertMesh.cpp
+        FOLDER ${FOLDER_SOFTWARE_CONVERT}
+        LINKS aliceVision_system
+              aliceVision_numeric
+              aliceVision_cmdline
+              aliceVision_mesh
+              ${Boost_LIBRARIES}
+    )
+endif() # ALICEVISION_BUILD_MVS

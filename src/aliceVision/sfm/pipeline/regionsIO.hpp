@@ -38,6 +38,19 @@ std::unique_ptr<feature::Regions> loadRegions(const std::vector<std::string>& fo
 std::unique_ptr<feature::Regions> loadFeatures(const std::vector<std::string>& folders, IndexT viewId, const feature::ImageDescriber& imageDescriber);
 
 /**
+ * @brief Load Features for each given view.
+ * @param[in,out] featuresPerDescPerView
+ * @param[in] viewIds The given view list
+ * @param[in] folders The feature Folders
+ * @param[in] imageDescriberTypes The imageDescriber types
+ * @return true if the features are correctlty loaded
+ */
+bool loadFeaturesPerDescPerView(std::vector<std::vector<std::unique_ptr<feature::Regions>>>& featuresPerDescPerView,
+                                const std::vector<IndexT>& viewIds,
+                                const std::vector<std::string>& folders,
+                                const std::vector<feature::EImageDescriberType>& imageDescriberTypes);
+
+/**
  * @brief Load Regions (Features & Descriptors) for each view of the provided SfMData container.
  * @param[in,out] regionsPerView
  * @param[in] sfmData The provided SfMData container
@@ -65,5 +78,5 @@ bool loadFeaturesPerView(feature::FeaturesPerView& featuresPerView,
                          const std::vector<std::string>& folders,
                          const std::vector<feature::EImageDescriberType>& imageDescriberTypes);
 
-} // namespace sfm
-} // namespace aliceVision
+}  // namespace sfm
+}  // namespace aliceVision

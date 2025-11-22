@@ -8,13 +8,14 @@
 #include "geoMesh.hpp"
 #include "UVAtlas.hpp"
 
+#include <aliceVision/utils/filesIO.hpp>
 #include <aliceVision/system/Logger.hpp>
-#include <aliceVision/system/MemoryInfo.hpp>
+#include <aliceVision/image/io.hpp>
+#include <aliceVision/image/pixelTypes.hpp>
 #include <aliceVision/numeric/numeric.hpp>
-#include <aliceVision/mvsData/Color.hpp>
 #include <aliceVision/mvsData/geometry.hpp>
 #include <aliceVision/mvsData/Pixel.hpp>
-#include <aliceVision/imageIO/image.hpp>
+#include <aliceVision/image/imageAlgo.hpp>
 
 #include <geogram/basic/common.h>
 #include <geogram/basic/geometry_nd.h>
@@ -22,10 +23,27 @@
 #include <geogram/mesh/mesh_io.h>
 #include <geogram/parameterization/mesh_atlas_maker.h>
 
-#include <boost/algorithm/string/case_conv.hpp> 
+#include <geogram/basic/permutation.h>
+#include <geogram/basic/attributes.h>
+#include <geogram/basic/geometry_nd.h>
+#include <geogram/points/kd_tree.h>
+#include <geogram/mesh/mesh_AABB.h>
+#include <geogram/mesh/mesh_reorder.h>
+#include <geogram/mesh/mesh_geometry.h>
 
+#include <boost/algorithm/string/case_conv.hpp>
+
+#include <assimp/Exporter.hpp>
+#include <assimp/scene.h>
+#include <assimp/postprocess.h>
+
+#include <filesystem>
 #include <map>
 #include <set>
+
+// Debug mode: save atlases decomposition in frequency bands and
+// the number of contribution in each band (if useScore is set to false)
+#define TEXTURING_MBB_DEBUG 0
 
 namespace aliceVision {
 namespace mesh {
@@ -35,56 +53,84 @@ EUnwrapMethod EUnwrapMethod_stringToEnum(const std::string& method)
     std::string m = method;
     boost::to_lower(m);
 
-    if(m == "basic")
+    if (m == "basic")
         return EUnwrapMethod::Basic;
-    if(m == "abf")
+    if (m == "abf")
         return EUnwrapMethod::ABF;
-    if(m == "lscm")
+    if (m == "lscm")
         return EUnwrapMethod::LSCM;
     throw std::out_of_range("Invalid unwrap method " + method);
 }
 
 std::string EUnwrapMethod_enumToString(EUnwrapMethod method)
 {
-    switch(method)
+    switch (method)
     {
-    case EUnwrapMethod::Basic:
-        return "Basic";
-    case EUnwrapMethod::ABF:
-        return "ABF";
-    case EUnwrapMethod::LSCM:
-        return "LSCM";
+        case EUnwrapMethod::Basic:
+            return "Basic";
+        case EUnwrapMethod::ABF:
+            return "ABF";
+        case EUnwrapMethod::LSCM:
+            return "LSCM";
     }
     throw std::out_of_range("Unrecognized EUnwrapMethod");
+}
+
+EVisibilityRemappingMethod EVisibilityRemappingMethod_stringToEnum(const std::string& method)
+{
+    if (method == "Pull")
+        return EVisibilityRemappingMethod::Pull;
+    if (method == "Push")
+        return EVisibilityRemappingMethod::Push;
+    if (method == "PullPush")
+        return EVisibilityRemappingMethod::PullPush;
+    if (method == "MeshItself")
+        return EVisibilityRemappingMethod::MeshItself;
+    throw std::out_of_range("Invalid visibilities remapping method " + method);
 }
 
 std::string EVisibilityRemappingMethod_enumToString(EVisibilityRemappingMethod method)
 {
     switch (method)
     {
-    case EVisibilityRemappingMethod::Pull:
-        return "Push";
-    case EVisibilityRemappingMethod::Push:
-        return "Pull";
-    case EVisibilityRemappingMethod::PullPush:
-        return "PullPush";
+        case EVisibilityRemappingMethod::Pull:
+            return "Push";
+        case EVisibilityRemappingMethod::Push:
+            return "Pull";
+        case EVisibilityRemappingMethod::PullPush:
+            return "PullPush";
+        case EVisibilityRemappingMethod::MeshItself:
+            return "MeshItself";
     }
     throw std::out_of_range("Unrecognized EVisibilityRemappingMethod");
 }
 
-EVisibilityRemappingMethod EVisibilityRemappingMethod_stringToEnum(const std::string& method)
+EBumpMappingType EBumpMappingType_stringToEnum(const std::string& type)
 {
-    std::string m = method;
-    boost::to_lower(m);
-    if (m == "pull")
-        return EVisibilityRemappingMethod::Pull;
-    if (m == "push")
-        return EVisibilityRemappingMethod::Push;
-    if (m == "pullpush")
-        return EVisibilityRemappingMethod::PullPush;
-    throw std::out_of_range("Invalid unwrap method " + method);
+    if (type == "Height")
+        return EBumpMappingType::Height;
+    if (type == "Normal")
+        return EBumpMappingType::Normal;
+    throw std::out_of_range("Invalid bump mapping type " + type);
 }
-
+std::string EBumpMappingType_enumToString(EBumpMappingType type)
+{
+    switch (type)
+    {
+        case EBumpMappingType::Height:
+            return "Height";
+        case EBumpMappingType::Normal:
+            return "Normal";
+    }
+    throw std::out_of_range("Invalid bump mapping type enum");
+}
+std::ostream& operator<<(std::ostream& os, EBumpMappingType bumpMappingType) { return os << EBumpMappingType_enumToString(bumpMappingType); }
+std::istream& operator>>(std::istream& in, EBumpMappingType& bumpMappingType)
+{
+    std::string token(std::istreambuf_iterator<char>(in), {});
+    bumpMappingType = EBumpMappingType_stringToEnum(token);
+    return in;
+}
 
 /**
  * @brief Return whether a pixel is contained in or intersected by a 2D triangle.
@@ -94,7 +140,7 @@ EVisibilityRemappingMethod EVisibilityRemappingMethod_stringToEnum(const std::st
  *  coordinates of this pixel relative to \p triangle
  * @return
  */
-bool isPixelInTriangle(const Point2d* triangle, const Pixel& pixel, Point2d& barycentricCoords)
+bool isPixelInTriangle(const Point2d* triangle, const Pixel& pixel, Point2d& barycentricCoords, double margin = 0.5)
 {
     // get pixel center
     GEO::vec2 p(pixel.x + 0.5, pixel.y + 0.5);
@@ -108,7 +154,7 @@ bool isPixelInTriangle(const Point2d* triangle, const Pixel& pixel, Point2d& bar
     barycentricCoords.x = l3;
     barycentricCoords.y = l2;
     // tolerance threshold of 1/2 pixel for pixels on the edges of the triangle
-    return dist < 0.5 + std::numeric_limits<double>::epsilon();
+    return dist < margin + std::numeric_limits<double>::epsilon();
 }
 
 Point2d barycentricToCartesian(const Point2d* triangle, const Point2d& coords)
@@ -121,62 +167,184 @@ Point3d barycentricToCartesian(const Point3d* triangle, const Point2d& coords)
     return triangle[0] + (triangle[2] - triangle[0]) * coords.x + (triangle[1] - triangle[0]) * coords.y;
 }
 
+inline GEO::vec3 mesh_facet_interpolate_normal_at_point(const GEO::Mesh& mesh, GEO::index_t f, const GEO::vec3& p)
+{
+    const GEO::index_t v0 = mesh.facets.vertex(f, 0);
+    const GEO::index_t v1 = mesh.facets.vertex(f, 1);
+    const GEO::index_t v2 = mesh.facets.vertex(f, 2);
+
+    const GEO::vec3 p0 = mesh.vertices.point(v0);
+    const GEO::vec3 p1 = mesh.vertices.point(v1);
+    const GEO::vec3 p2 = mesh.vertices.point(v2);
+
+    const GEO::vec3 n0 = GEO::normalize(GEO::Geom::mesh_vertex_normal(mesh, v0));
+    const GEO::vec3 n1 = GEO::normalize(GEO::Geom::mesh_vertex_normal(mesh, v1));
+    const GEO::vec3 n2 = GEO::normalize(GEO::Geom::mesh_vertex_normal(mesh, v2));
+
+    GEO::vec3 barycCoords;
+    GEO::vec3 closestPoint;
+    GEO::Geom::point_triangle_squared_distance<GEO::vec3>(p, p0, p1, p2, closestPoint, barycCoords.x, barycCoords.y, barycCoords.z);
+
+    const GEO::vec3 n = barycCoords.x * n0 + barycCoords.y * n1 + barycCoords.z * n2;
+
+    return GEO::normalize(n);
+}
+
+inline GEO::vec3 mesh_facet_interpolate_normal_at_point(const StaticVector<Point3d>& ptsNormals, const Mesh& mesh, GEO::index_t f, const GEO::vec3& p)
+{
+    const GEO::index_t v0 = (mesh.tris)[f].v[0];
+    const GEO::index_t v1 = (mesh.tris)[f].v[1];
+    const GEO::index_t v2 = (mesh.tris)[f].v[2];
+
+    const GEO::vec3 p0((mesh.pts)[v0].x, (mesh.pts)[v0].y, (mesh.pts)[v0].z);
+    const GEO::vec3 p1((mesh.pts)[v1].x, (mesh.pts)[v1].y, (mesh.pts)[v1].z);
+    const GEO::vec3 p2((mesh.pts)[v2].x, (mesh.pts)[v2].y, (mesh.pts)[v2].z);
+
+    const GEO::vec3 n0(ptsNormals[v0].x, ptsNormals[v0].y, ptsNormals[v0].z);
+    const GEO::vec3 n1(ptsNormals[v1].x, ptsNormals[v1].y, ptsNormals[v1].z);
+    const GEO::vec3 n2(ptsNormals[v2].x, ptsNormals[v2].y, ptsNormals[v2].z);
+
+    GEO::vec3 barycCoords;
+    GEO::vec3 closestPoint;
+    GEO::Geom::point_triangle_squared_distance<GEO::vec3>(p, p0, p1, p2, closestPoint, barycCoords.x, barycCoords.y, barycCoords.z);
+
+    const GEO::vec3 n = barycCoords.x * n0 + barycCoords.y * n1 + barycCoords.z * n2;
+
+    return GEO::normalize(n);
+}
+
+template<class T, GEO::index_t DIM>
+inline Eigen::Matrix<T, DIM, 1> toEigen(const GEO::vecng<DIM, T>& v)
+{
+    return Eigen::Matrix<T, DIM, 1>(v.data());
+}
+
+/**
+ * @brief Compute a transformation matrix to convert coordinates in world space coordinates into the triangle space.
+ * The triangle space is define by the Z-axis as the normal of the triangle,
+ * the X-axis aligned with the horizontal line in the texture file (using texture/UV coordinates).
+ *
+ * @param[in] mesh: input mesh
+ * @param[in] f: facet/triangle index
+ * @param[in] triPts: UV Coordinates
+ * @return Rotation matrix to convert from world space coordinates in the triangle space
+ */
+inline Eigen::Matrix3d computeTriangleTransform(const Mesh& mesh, int f, const Point2d* triPts)
+{
+    const Eigen::Vector3d p0 = toEigen((mesh.pts)[(mesh.tris)[f].v[0]]);
+    const Eigen::Vector3d p1 = toEigen((mesh.pts)[(mesh.tris)[f].v[1]]);
+    const Eigen::Vector3d p2 = toEigen((mesh.pts)[(mesh.tris)[f].v[2]]);
+
+    const Eigen::Vector3d tX = (p1 - p0).normalized();                        // edge0 => local triangle X-axis
+    const Eigen::Vector3d N = tX.cross((p2 - p0).normalized()).normalized();  // cross(edge0, edge1) => Z-axis
+
+    // Correct triangle X-axis to be align with X-axis in the texture
+    const GEO::vec2 t0 = GEO::vec2(triPts[0].m);
+    const GEO::vec2 t1 = GEO::vec2(triPts[1].m);
+    const GEO::vec2 tV = GEO::normalize(t1 - t0);
+    const GEO::vec2 origNormal(1.0, 0.0);  // X-axis in the texture
+    const double tAngle = GEO::Geom::angle(tV, origNormal);
+    Eigen::Matrix3d transform(Eigen::AngleAxisd(tAngle, N).toRotationMatrix());
+    // Rotate triangle v0v1 axis around Z-axis, to get a X axis aligned with the 2d texture
+    Eigen::Vector3d X = (transform * tX).normalized();
+
+    const Eigen::Vector3d Y = N.cross(X).normalized();  // Y-axis
+
+    Eigen::Matrix3d m;
+    m.col(0) = X;
+    m.col(1) = Y;
+    m.col(2) = N;
+    // const Eigen::Matrix3d mInv = m.inverse();
+    const Eigen::Matrix3d mT = m.transpose();
+
+    return mT;
+}
+
+inline void computeNormalHeight(const GEO::Mesh& mesh,
+                                double orientation,
+                                double t,
+                                GEO::index_t f,
+                                const Eigen::Matrix3d& m,
+                                const GEO::vec3& q,
+                                const GEO::vec3& qA,
+                                const GEO::vec3& qB,
+                                float& out_height,
+                                image::RGBfColor& out_normal)
+{
+    GEO::vec3 intersectionPoint = t * qB + (1.0 - t) * qA;
+    out_height = q.distance(intersectionPoint) * orientation;
+
+    // Use facet normal
+    // GEO::vec3 denseMeshNormal_f = normalize(GEO::Geom::mesh_facet_normal(mesh, f));
+    // Use per pixel normal using weighted interpolation of the facet vertex normals
+    const GEO::vec3 denseMeshNormal = mesh_facet_interpolate_normal_at_point(mesh, f, intersectionPoint);
+
+    Eigen::Vector3d dNormal = m * toEigen(denseMeshNormal);
+    dNormal.normalize();
+    out_normal = image::RGBfColor(dNormal(0), dNormal(1), dNormal(2));
+}
+
 void Texturing::generateUVsBasicMethod(mvsUtils::MultiViewParams& mp)
 {
-    if(!me)
+    if (!mesh)
         throw std::runtime_error("Can't generate UVs without a mesh");
+    if (mesh->pointsVisibilities.empty())
+        throw std::runtime_error("Points visibilities are required for basic unwrap method.");
 
     // automatic uv atlasing
     ALICEVISION_LOG_INFO("Generating UVs (textureSide: " << texParams.textureSide << "; padding: " << texParams.padding << ").");
-    UVAtlas mua(*me, mp, pointsVisibilities, texParams.textureSide, texParams.padding);
+    UVAtlas mua(*mesh, mp, texParams.textureSide, texParams.padding);
+
     // create a new mesh to store data
-    Mesh* m = new Mesh();
-    m->pts = new StaticVector<Point3d>();
-    m->pts->reserve(me->pts->size());
-    m->tris = new StaticVector<Mesh::triangle>();
-    m->tris->reserve(me->tris->size());
-    trisUvIds.reserve(me->tris->size());
-    uvCoords.reserve(me->pts->size());
+    mesh->trisUvIds.reserve(mesh->tris.size());
+    mesh->uvCoords.reserve(mesh->pts.size());  // not sufficient
     _atlases.clear();
     _atlases.resize(mua.atlases().size());
+    mesh->nmtls = mua.atlases().size();
 
-    std::map<int, int> vertexCache;
-    PointsVisibility* updatedPointsCams = new PointsVisibility;
-    updatedPointsCams->reserve(pointsVisibilities->size());
+    // std::map<int, int> vertexCache;
+    // PointsVisibility* updatedPointsCams = new PointsVisibility;
+    // updatedPointsCams->reserve(mesh->pointsVisibilities.size());
 
     int atlasId = 0;
-    int triangleCount = 0;
 
-    for(auto& charts : mua.atlases())
+    for (auto& charts : mua.atlases())
     {
-        for(auto& chart : charts)
+        for (auto& chart : charts)
         {
+            if (chart.refCameraID == -1)
+                continue;
+
             std::map<int, int> uvCache;
 
             Point2d sourceLU(chart.sourceLU.x, chart.sourceLU.y);
             Point2d targetLU(chart.targetLU.x, chart.targetLU.y);
 
             // for each triangle in this chart
-            for(size_t i = 0 ; i<chart.triangleIDs.size(); ++i)
+            for (size_t i = 0; i < chart.triangleIDs.size(); ++i)
             {
                 int triangleID = chart.triangleIDs[i];
                 // register triangle in corresponding atlas
-                _atlases[atlasId].push_back(triangleCount);
+                mesh->trisMtlIds()[triangleID] = atlasId;
+                _atlases[atlasId].push_back(triangleID);
 
-                Mesh::triangle t;
-                Voxel triUv;
+                Voxel& triUvIds = mesh->trisUvIds[triangleID];
                 // for each point
-                for(int k = 0; k < 3; ++k)
+                for (int k = 0; k < 3; ++k)
                 {
-                    int pointId = (*me->tris)[triangleID].v[k];
-                    // get 3d triangle points
-                    Point3d p = (*me->pts)[pointId];
-                    Point2d uvPix;
-                    if(chart.refCameraID != -1)
+                    int pointId = mesh->tris[triangleID].v[k];
+
+                    int uvIdx;
+                    auto uvCacheIt = uvCache.find(pointId);
+                    // if uv coords for this point had not been computed in this chart yet
+                    if (uvCacheIt == uvCache.end())
                     {
+                        const Point3d& p = mesh->pts[pointId];
+                        Point2d uvPix;
+
                         Point2d pix;
                         mp.getPixelFor3DPoint(&pix, p, chart.refCameraID);
-                        if(mp.isPixelInImage(pix, chart.refCameraID))
+                        if (mp.isPixelInImage(pix, chart.refCameraID))
                         {
                             // compute the final pixel coordinates
                             // get pixel offset in reference camera space with applied downscale
@@ -186,153 +354,179 @@ void Texturing::generateUVsBasicMethod(mvsUtils::MultiViewParams& mp)
                             uvPix.y = 1.0 - uvPix.y;
 
                             // sanity check: discard invalid UVs
-                            if(   uvPix.x < 0 || uvPix.x > 1.0 
-                               || uvPix.y < 0 || uvPix.x > 1.0 )
+                            if (uvPix.x < 0 || uvPix.x > 1.0 || uvPix.y < 0 || uvPix.y > 1.0)
                             {
                                 ALICEVISION_LOG_WARNING("Discarding invalid UV: " + std::to_string(uvPix.x) + ", " + std::to_string(uvPix.y));
                                 uvPix = Point2d();
                             }
 
-                            if(texParams.useUDIM)
+                            if (texParams.useUDIM)
                             {
-                              uvPix.x += atlasId % 10;
-                              uvPix.y += atlasId / 10;
+                                uvPix.x += atlasId % 10;
+                                uvPix.y += atlasId / 10;
                             }
                         }
-                    }
-
-                    auto it = vertexCache.find(pointId);
-                    int newPointIdx;
-                    int uvIdx;
-                    if(it == vertexCache.end())
-                    {
-                        m->pts->push_back(p);
-                        newPointIdx = m->pts->size() - 1;
-                        // map point visibilities
-                        StaticVector<int>* pOther = new StaticVector<int>();
-                        StaticVector<int>* pRef = (*pointsVisibilities)[pointId];
-                        if(pRef)
-                            *pOther = *pRef;
-                        updatedPointsCams->push_back(pOther);
-                        // update cache
-                        vertexCache[pointId] = newPointIdx;
+                        mesh->uvCoords.push_back(uvPix);
+                        uvIdx = mesh->uvCoords.size() - 1;
+                        uvCache[pointId] = uvIdx;
                     }
                     else
                     {
-                        newPointIdx = it->second;
+                        uvIdx = uvCacheIt->second;
                     }
-                    t.v[k] = newPointIdx;
-                    // store uv coord and triangle mapping
-                    auto uvcacheIt = uvCache.find(newPointIdx);
-                    if(uvcacheIt == uvCache.end())
-                    {
-                        uvCoords.push_back(uvPix);
-                        uvIdx = uvCoords.size() - 1;
-                        uvCache[newPointIdx] = uvIdx;
-                    }
-                    else
-                        uvIdx = uvcacheIt->second;
-                    triUv.m[k] = uvIdx;
+                    triUvIds.m[k] = uvIdx;
                 }
-                m->tris->push_back(t);
-                trisUvIds.push_back(triUv);
-                triangleCount++;
             }
         }
-        atlasId++;
+        ++atlasId;
     }
-
-    // replace internal mesh
-    std::swap(me, m);
-    delete m;
-    // replace visibilities
-    std::swap(pointsVisibilities, updatedPointsCams);
-    deleteArrayOfArrays<int>(&updatedPointsCams);
 }
 
-void Texturing::generateTextures(const mvsUtils::MultiViewParams &mp,
-                                 const boost::filesystem::path &outPath, EImageFileType textureFileType)
+void Texturing::updateAtlases()
 {
-    mvsUtils::ImagesCache imageCache(&mp, 0);
-    system::MemoryInfo memInfo = system::getMemoryInfo();
+    ALICEVISION_LOG_INFO("updateAtlases");
+    // Fill atlases (1 atlas per material) with triangles issued from mesh subdivision
+    _atlases.clear();
+    _atlases.resize(std::max(1, mesh->nmtls));
+    for (int triangleID = 0; triangleID < mesh->trisMtlIds().size(); ++triangleID)
+    {
+        unsigned int atlasID = mesh->nmtls ? mesh->trisMtlIds()[triangleID] : 0;
+        if (mesh->trisMtlIds()[triangleID] != -1)
+            _atlases[atlasID].push_back(triangleID);
+    }
+}
 
-    //calculate the maximum number of atlases in memory in Mb
-    unsigned int atlasSize = texParams.textureSide * texParams.textureSide;
-    size_t atlasMemSize = atlasSize * 3 * sizeof(float) / std::pow(2,20); //Mb
-    int imageMaxSize = mp.getMaxImageWidth() * mp.getMaxImageHeight();
-    size_t imageMaxMemSize = imageMaxSize * 3 * sizeof(float) / std::pow(2,20); //Mb
+void Texturing::generateTextures(const mvsUtils::MultiViewParams& mp,
+                                 const fs::path& outPath,
+                                 size_t memoryAvailable,
+                                 image::EImageFileType textureFileType,
+                                 mvsUtils::EFileType imageType)
+{
+    // Ensure that contribution levels do not contain 0 and are sorted (as each frequency band contributes to lower bands).
+    auto& m = texParams.multiBandNbContrib;
+    m.erase(std::remove(std::begin(m), std::end(m), 0), std::end(m));
+    texParams.nbBand = m.size();
 
-    int freeMem = int(memInfo.freeRam / std::pow(2,20));
-    int availableMem = freeMem - int(imageMaxMemSize); // keep some memory for the input image buffers
-    int nbAtlasMax = availableMem / atlasMemSize; //maximum number of textures in RAM
-    int nbAtlas = _atlases.size();
-    nbAtlasMax = std::max(1, nbAtlasMax); //if not enough memory, do it one by one
-    nbAtlasMax = std::min(nbAtlas, nbAtlasMax); //if enough memory, do it with all atlases
+    if (!std::is_sorted(std::begin(m), std::end(m)))
+    {
+        ALICEVISION_LOG_INFO("Sorting contributions per band (necessary).");
+        std::sort(std::begin(m), std::end(m));
+    }
+    ALICEVISION_LOG_INFO("Texturing: Use multiband blending with the following contributions per band:");
+    for (int c : texParams.multiBandNbContrib)
+    {
+        ALICEVISION_LOG_INFO("  - " << c);
+    }
+    std::partial_sum(m.begin(), m.end(), m.begin());
 
-    div_t divresult = div(nbAtlas, nbAtlasMax);
-    int nquot = divresult.quot;
-    int nrem = divresult.rem;
+    ALICEVISION_LOG_INFO("Texturing in " + image::EImageColorSpace_enumToString(texParams.workingColorSpace) + " colorspace.");
+    mvsUtils::ImagesCache<image::Image<image::RGBfColor>> imageCache(mp, texParams.workingColorSpace, texParams.correctEV);
 
-    ALICEVISION_LOG_INFO("Total amount of free memory  : " << freeMem << " Mb.");
-    ALICEVISION_LOG_INFO("Total amount of an image in memory  : " << imageMaxMemSize << " Mb.");
-    ALICEVISION_LOG_INFO("Total amount of memory available : " << availableMem << " Mb.");
-    ALICEVISION_LOG_INFO("Size of an atlas : " << atlasMemSize << " Mb.");
-    ALICEVISION_LOG_INFO("Processing " << nbAtlas << " atlases by chunks of " << nbAtlasMax << " (" << nquot + 1 << " iterations).");
+    imageCache.setCacheSize(2);
+    ALICEVISION_LOG_INFO("Images loaded from cache with: " + ECorrectEV_enumToString(texParams.correctEV));
 
-    //generateTexture for the maximum number of atlases, and iterate
+    // calculate the maximum number of atlases in memory in MB
+    const std::size_t imageMaxMemSize = mp.getMaxImageWidth() * mp.getMaxImageHeight() * sizeof(image::RGBfColor) / std::pow(2, 20);  // MB
+    const std::size_t imagePyramidMaxMemSize = texParams.nbBand * imageMaxMemSize;
+    const std::size_t atlasContribMemSize =
+      texParams.textureSide * texParams.textureSide * (sizeof(image::RGBfColor) + sizeof(float)) / std::pow(2, 20);  // MB
+    const std::size_t atlasPyramidMaxMemSize = texParams.nbBand * atlasContribMemSize;
+
+    const int availableRam = int(memoryAvailable / std::pow(2, 20));
+    const int availableMem =
+      availableRam - 2 * (imagePyramidMaxMemSize + imageMaxMemSize);  // keep some memory for the 2 input images in cache and one laplacian pyramid
+
+    const int nbAtlas = _atlases.size();
+    // Memory needed to process each attlas = input + input pyramid + output atlas pyramid
+    const int memoryPerAtlas = (imageMaxMemSize + imagePyramidMaxMemSize) + atlasPyramidMaxMemSize;
+    int nbAtlasMax = std::floor(availableMem / double(memoryPerAtlas));  // maximum number of textures laplacian pyramid in RAM
+    nbAtlasMax = std::min(nbAtlas, nbAtlasMax);                          // if enough memory, do it with all atlases
+    nbAtlasMax = std::max(1, nbAtlasMax);                                // avoid division zero calculating chunks
+
+    ALICEVISION_LOG_INFO("nbAtlas: " << nbAtlas);
+    ALICEVISION_LOG_INFO("availableRam: " << availableRam);
+    ALICEVISION_LOG_INFO("availableMem: " << availableMem);
+    ALICEVISION_LOG_INFO("memoryPerAtlas: " << memoryPerAtlas);
+
+    ALICEVISION_LOG_DEBUG("nbAtlasMax: " << nbAtlasMax);
+
+    if (availableMem < memoryPerAtlas)
+        ALICEVISION_LOG_WARNING("Memory may be insufficient to complete the job. Lack (MB): " << memoryPerAtlas - availableMem);
+
+    // Add rounding to have a uniform repartition between chunks (avoid a small chunk at the end)
+    const int nChunks = divideRoundUp(nbAtlas, nbAtlasMax);
+    nbAtlasMax = divideRoundUp(nbAtlas, nChunks);
+    ALICEVISION_LOG_DEBUG("nChunks: " << nChunks);
+    ALICEVISION_LOG_INFO("nbAtlasMax (after rounding): " << nbAtlasMax);
+
+    if (availableMem - nbAtlasMax * atlasPyramidMaxMemSize < 1000)  // keep 1 GB margin in memory
+        nbAtlasMax -= 1;
+    nbAtlasMax = std::max(1, nbAtlasMax);  // if not enough memory, do it one by one
+
+    ALICEVISION_LOG_INFO("Total amount of available RAM: " << availableRam << " MB.");
+    ALICEVISION_LOG_INFO("Total amount of memory remaining for the computation: " << availableMem << " MB.");
+    ALICEVISION_LOG_INFO("Total amount of an image in memory: " << imageMaxMemSize << " MB.");
+    ALICEVISION_LOG_INFO("Total amount of an atlas pyramid in memory: " << atlasPyramidMaxMemSize << " MB.");
+    ALICEVISION_LOG_INFO("Processing " << nbAtlas << " atlases by chunks of " << nbAtlasMax);
+
+    // generateTexture for the maximum number of atlases, and iterate
+    const std::div_t divresult = div(nbAtlas, nbAtlasMax);
     std::vector<size_t> atlasIDs;
     atlasIDs.reserve(nbAtlasMax);
-    for(int n = 0; n <= nquot; ++n)
+    for (int n = 0; n <= divresult.quot; ++n)
     {
         atlasIDs.clear();
-        int imax = (n < nquot ? nbAtlasMax : nrem);
-        if(!imax)
+        int imax = (n < divresult.quot ? nbAtlasMax : divresult.rem);
+        if (!imax)
             continue;
-        for(int i = 0; i < imax; ++i)
+        for (int i = 0; i < imax; ++i)
         {
-            size_t atlasID = size_t(n*nbAtlasMax + i);
+            size_t atlasID = size_t(n * nbAtlasMax + i);
             atlasIDs.push_back(atlasID);
         }
-        ALICEVISION_LOG_INFO("Generating texture for atlases " << n*nbAtlasMax << " to " << n*nbAtlasMax+imax-1 << " (process a chunk of " << atlasIDs.size() << " atlases within " << _atlases.size() << " atlases).");
-        generateTexturesSubSet(mp, atlasIDs, imageCache, outPath, textureFileType);
+        ALICEVISION_LOG_INFO("Generating texture for atlases " << n * nbAtlasMax + 1 << " to " << n * nbAtlasMax + imax);
+        generateTexturesSubSet(mp, atlasIDs, imageCache, outPath, textureFileType, imageType);
     }
 }
 
 void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
-                                std::vector<size_t> atlasIDs, mvsUtils::ImagesCache& imageCache, const bfs::path& outPath, EImageFileType textureFileType)
+                                       const std::vector<size_t>& atlasIDs,
+                                       mvsUtils::ImagesCache<image::Image<image::RGBfColor>>& imageCache,
+                                       const fs::path& outPath,
+                                       image::EImageFileType textureFileType,
+                                       mvsUtils::EFileType imageType)
 {
-    if(atlasIDs.size() > _atlases.size())
+    if (atlasIDs.size() > _atlases.size())
         throw std::runtime_error("Invalid atlas IDs ");
 
     unsigned int textureSize = texParams.textureSide * texParams.textureSide;
 
-    using AtlasIndex = size_t;
-    using TrianglesId = std::vector<unsigned int>;
-
     // We select the best cameras for each triangle and store it per camera for each output texture files.
-    // List of triangle IDs (selected to contribute to the final texturing) per image.
-    std::vector<std::map<AtlasIndex, TrianglesId>> contributionsPerCamera(mp.ncams);
+    // Triangles contributions are stored per frequency bands for multi-band blending.
+    using AtlasIndex = size_t;
+    using ScorePerTriangle = std::vector<std::pair<unsigned int, float>>;  // list of <triangleId, score>
+    std::vector<std::map<AtlasIndex, std::vector<ScorePerTriangle>>> contributionsPerCamera(mp.ncams);
 
-    //for each atlasID
-    for(const size_t atlasID : atlasIDs)
+    // for each atlasID, calculate contributionPerCamera
+    for (const size_t atlasID : atlasIDs)
     {
-        ALICEVISION_LOG_INFO("Generating texture for atlas " << atlasID + 1 << "/" << _atlases.size()
-                  << " (" << _atlases[atlasID].size() << " triangles).");
+        ALICEVISION_LOG_INFO("Generating texture for atlas " << atlasID + 1 << "/" << _atlases.size() << " (" << _atlases[atlasID].size()
+                                                             << " triangles).");
 
         // iterate over atlas' triangles
-        for(size_t i = 0; i < _atlases[atlasID].size(); ++i)
+        for (size_t i = 0; i < _atlases[atlasID].size(); ++i)
         {
             int triangleID = _atlases[atlasID][i];
 
             // Fuse visibilities of the 3 vertices
             std::vector<int> allTriCams;
-            for (int k = 0; k < 3; k++)
+            for (int k = 0; k < 3; ++k)
             {
-                const int pointIndex = (*me->tris)[triangleID].v[k];
-                const StaticVector<int>* pointVisibilities = (*pointsVisibilities)[pointIndex];
-                if (pointVisibilities != nullptr)
+                const int pointIndex = mesh->tris[triangleID].v[k];
+                const StaticVector<int> pointVisibilities = mesh->pointsVisibilities[pointIndex];
+                if (!pointVisibilities.empty())
                 {
-                    std::copy(pointVisibilities->begin(), pointVisibilities->end(), std::inserter(allTriCams, allTriCams.end()));
+                    std::copy(pointVisibilities.begin(), pointVisibilities.end(), std::inserter(allTriCams, allTriCams.end()));
                 }
             }
             if (allTriCams.empty())
@@ -343,12 +537,12 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
             }
             std::sort(allTriCams.begin(), allTriCams.end());
 
-            std::vector<std::pair<int, int>> selectedTriCams; // <camId, nbVertices>
+            std::vector<std::pair<int, int>> selectedTriCams;  // <camId, nbVertices>
             selectedTriCams.emplace_back(allTriCams.front(), 1);
             for (int j = 1; j < allTriCams.size(); ++j)
             {
                 const unsigned int camId = allTriCams[j];
-                if(selectedTriCams.back().first == camId)
+                if (selectedTriCams.back().first == camId)
                 {
                     ++selectedTriCams.back().second;
                 }
@@ -365,36 +559,36 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
             Point3d triangleCenter;
             if (texParams.angleHardThreshold != 0.0)
             {
-                triangleNormal = me->computeTriangleNormal(triangleID);
-                triangleCenter = me->computeTriangleCenterOfGravity(triangleID);
+                triangleNormal = mesh->computeTriangleNormal(triangleID);
+                triangleCenter = mesh->computeTriangleCenterOfGravity(triangleID);
             }
-            using ScoreCamId = std::tuple<int, double, int>;
-            std::vector<ScoreCamId> scorePerCamId; // <nbVertex, score, camId>
-            for (const auto& itCamVis: selectedTriCams)
+            using ScoreCamId = std::tuple<int, double, int>;  // <nbVertex, score, camId>
+            std::vector<ScoreCamId> scorePerCamId;
+            for (const auto& itCamVis : selectedTriCams)
             {
                 const int camId = itCamVis.first;
                 const int verticesSupport = itCamVis.second;
-                if(texParams.forceVisibleByAllVertices && verticesSupport < 3)
+                if (texParams.forceVisibleByAllVertices && verticesSupport < 3)
                     continue;
 
                 if (texParams.angleHardThreshold != 0.0)
                 {
                     const Point3d vecPointToCam = (mp.CArr[camId] - triangleCenter).normalize();
                     const double angle = angleBetwV1andV2(triangleNormal, vecPointToCam);
-                    if(angle > texParams.angleHardThreshold)
+                    if (angle > texParams.angleHardThreshold)
                         continue;
                 }
 
                 const int w = mp.getWidth(camId);
                 const int h = mp.getHeight(camId);
 
-                const Mesh::triangle_proj tProj = me->getTriangleProjection(triangleID, &mp, camId, w, h);
-                const int nbVertex = me->getTriangleNbVertexInImage(tProj, w, h, 20);
-                if(nbVertex == 0)
+                const Mesh::triangle_proj tProj = mesh->getTriangleProjection(triangleID, mp, camId, w, h);
+                const int nbVertex = mesh->getTriangleNbVertexInImage(mp, tProj, camId, 20);
+                if (nbVertex == 0)
                     // No triangle vertex in the image
                     continue;
 
-                const double area = me->computeTriangleProjectionArea(tProj);
+                const double area = mesh->computeTriangleProjectionArea(tProj);
                 const double score = area * double(verticesSupport);
                 scorePerCamId.emplace_back(nbVertex, score, camId);
             }
@@ -406,384 +600,669 @@ void Texturing::generateTexturesSubSet(const mvsUtils::MultiViewParams& mp,
             }
 
             std::sort(scorePerCamId.begin(), scorePerCamId.end(), std::greater<ScoreCamId>());
-            const double minScore = texParams.bestScoreThreshold * std::get<1>(scorePerCamId.front()); // bestScoreThreshold * bestScore
+            const double minScore = texParams.bestScoreThreshold * std::get<1>(scorePerCamId.front());  // bestScoreThreshold * bestScore
             const bool bestIsPartial = (std::get<0>(scorePerCamId.front()) < 3);
+
+            int nbContribMax = std::min(texParams.multiBandNbContrib.back(), static_cast<int>(scorePerCamId.size()));
             int nbCumulatedVertices = 0;
-            const int maxNbVerticesForFusion = texParams.maxNbImagesForFusion * 3;
-            for(int i = 0; i < scorePerCamId.size(); ++i)
+            int band = 0;
+            for (int contrib = 0; nbCumulatedVertices < 3 * nbContribMax && contrib < nbContribMax; ++contrib)
             {
-                if (!bestIsPartial && i > 0)
+                nbCumulatedVertices += std::get<0>(scorePerCamId[contrib]);
+                if (!bestIsPartial && contrib != 0)
                 {
-                    bool triVisIsPartial = (std::get<0>(scorePerCamId[i]) < 3);
-                    nbCumulatedVertices += std::get<0>(scorePerCamId[i]);
-                    if(maxNbVerticesForFusion != 0 && nbCumulatedVertices > maxNbVerticesForFusion)
-                        break;
-                    if(std::get<1>(scorePerCamId[i]) < minScore)
+                    if (std::get<1>(scorePerCamId[contrib]) < minScore)
+                    {
                         // The best image fully see the triangle and has a much better score, so only rely on the first ones
                         break;
+                    }
                 }
 
-                //add triangleID to the corresponding texture for this camera
-                const int camId = std::get<2>(scorePerCamId[i]);
-                contributionsPerCamera[camId][atlasID].push_back(triangleID);
+                // for the camera camId : add triangle score to the corresponding texture, at the right frequency band
+                const int camId = std::get<2>(scorePerCamId[contrib]);
+                const int triangleScore = std::get<1>(scorePerCamId[contrib]);
+                auto& camContribution = contributionsPerCamera[camId];
+                if (camContribution.find(atlasID) == camContribution.end())
+                    camContribution[atlasID].resize(texParams.nbBand);
+                camContribution.at(atlasID)[band].emplace_back(triangleID, triangleScore);
+
+                if (contrib + 1 == texParams.multiBandNbContrib[band])
+                {
+                    ++band;
+                }
             }
         }
     }
 
     ALICEVISION_LOG_INFO("Reading pixel color.");
 
-    // Create buffer for the set of output textures
-    struct AccuImage
+    // pyramid of atlases frequency bands
+    std::map<AtlasIndex, AccuPyramid> accuPyramids;
+    for (std::size_t atlasID : atlasIDs)
+        accuPyramids[atlasID].init(texParams.nbBand, texParams.textureSide, texParams.textureSide);
+
+    // for each camera, for each texture, iterate over triangles and fill the accuPyramids map
+    for (int camId = 0; camId < contributionsPerCamera.size(); ++camId)
     {
-        std::vector<Color> img;
-        std::vector<int> imgCount;
+        const std::map<AtlasIndex, std::vector<ScorePerTriangle>>& cameraContributions = contributionsPerCamera[camId];
 
-        void resize(std::size_t s)
+        if (cameraContributions.empty())
         {
-            img.resize(s);
-            imgCount.resize(s);
-        }
-    };
-
-    std::map<AtlasIndex, AccuImage> accuImages;
-    for(std::size_t atlasID: atlasIDs)
-        accuImages[atlasID].resize(textureSize);
-
-    //for each camera, for each texture, iterate over triangles and fill the colorID map
-    int camId = 0;
-    for(const std::map<AtlasIndex, TrianglesId>& cameraContributions : contributionsPerCamera)
-    {
-        if(cameraContributions.empty())
-        {
-            ALICEVISION_LOG_INFO(" - camera " << camId + 1 << "/" << mp.ncams << " unused.");
+            ALICEVISION_LOG_INFO("- camera " << mp.getViewId(camId) << " (" << camId + 1 << "/" << mp.ncams << ") unused.");
             continue;
         }
-        ALICEVISION_LOG_INFO(" - camera " << camId + 1 << "/" << mp.ncams << " with contributions to " << cameraContributions.size() << " texture files:");
+        ALICEVISION_LOG_INFO("- camera " << mp.getViewId(camId) << " (" << camId + 1 << "/" << mp.ncams << ") with contributions to "
+                                         << cameraContributions.size() << " texture files:");
 
-        imageCache.refreshData(camId);
+        // Load camera image from cache
+        auto imgPtr = imageCache.getImg_sync(camId);
+        const image::Image<image::RGBfColor>& camImg = *imgPtr;
+
+        // Calculate laplacianPyramid
+        std::vector<image::Image<image::RGBfColor>> pyramidL;  // laplacian pyramid
+        imageAlgo::laplacianPyramid(pyramidL, camImg, texParams.nbBand, texParams.multiBandDownscale);
 
         // for each output texture file
-        for(const auto& c : cameraContributions)
+        for (const auto& c : cameraContributions)
         {
             AtlasIndex atlasID = c.first;
-            AccuImage& accuImage = accuImages.at(atlasID);
-            const TrianglesId& trianglesId = c.second;
+            ALICEVISION_LOG_INFO("  - Texture file: " << atlasID + 1);
+            // for each frequency band
+            for (int band = 0; band < c.second.size(); ++band)
+            {
+                const ScorePerTriangle& trianglesId = c.second[band];
+                ALICEVISION_LOG_INFO("      - band " << band + 1 << ": " << trianglesId.size() << " triangles.");
 
-            ALICEVISION_LOG_INFO("    Texture file: " << atlasID << ", number of triangles: " << trianglesId.size() << ".");
+// for each triangle
+#pragma omp parallel for
+                for (int ti = 0; ti < trianglesId.size(); ++ti)
+                {
+                    const unsigned int triangleId = std::get<0>(trianglesId[ti]);
+                    const float triangleScore = texParams.useScore ? std::get<1>(trianglesId[ti]) : 1.0f;
+                    // retrieve triangle 3D and UV coordinates
+                    Point2d triPixs[3];
+                    Point3d triPts[3];
+                    auto& triangleUvIds = mesh->trisUvIds[triangleId];
+                    // compute the Bottom-Left minima of the current UDIM for [0,1] range remapping
+                    Point2d udimBL;
+                    StaticVector<Point2d>& uvCoords = mesh->uvCoords;
+                    udimBL.x = std::floor(std::min({uvCoords[triangleUvIds[0]].x, uvCoords[triangleUvIds[1]].x, uvCoords[triangleUvIds[2]].x}));
+                    udimBL.y = std::floor(std::min({uvCoords[triangleUvIds[0]].y, uvCoords[triangleUvIds[1]].y, uvCoords[triangleUvIds[2]].y}));
 
-           // for each triangle
-           #pragma omp parallel for
-           for(int ti = 0; ti < trianglesId.size(); ++ti)
-           {
-               const unsigned int triangleId = trianglesId[ti];
-               // retrieve triangle 3D and UV coordinates
-               Point2d triPixs[3];
-               Point3d triPts[3];
+                    for (int k = 0; k < 3; ++k)
+                    {
+                        const int pointIndex = mesh->tris[triangleId].v[k];
+                        triPts[k] = mesh->pts[pointIndex];  // 3D coordinates
+                        const int uvPointIndex = triangleUvIds.m[k];
+                        Point2d uv = uvCoords[uvPointIndex];
+                        // UDIM: remap coordinates between [0,1]
+                        uv = uv - udimBL;
 
-               for(int k = 0; k < 3; k++)
-               {
-                   const int pointIndex = (*me->tris)[triangleId].v[k];
-                   triPts[k] = (*me->pts)[pointIndex];                               // 3D coordinates
-                   const int uvPointIndex = trisUvIds[triangleId].m[k];
-                   Point2d uv = uvCoords[uvPointIndex];
-                   uv.x -= std::floor(uv.x);
-                   uv.y -= std::floor(uv.y);
+                        triPixs[k] = uv * texParams.textureSide;  // UV coordinates
+                    }
 
-                   triPixs[k] = uv * texParams.textureSide;   // UV coordinates
-               }
+                    // compute triangle bounding box in pixel indexes
+                    // min values: floor(value)
+                    // max values: ceil(value)
+                    Pixel LU, RD;
+                    LU.x = static_cast<int>(std::floor(std::min({triPixs[0].x, triPixs[1].x, triPixs[2].x})));
+                    LU.y = static_cast<int>(std::floor(std::min({triPixs[0].y, triPixs[1].y, triPixs[2].y})));
+                    RD.x = static_cast<int>(std::ceil(std::max({triPixs[0].x, triPixs[1].x, triPixs[2].x})));
+                    RD.y = static_cast<int>(std::ceil(std::max({triPixs[0].y, triPixs[1].y, triPixs[2].y})));
 
-               // compute triangle bounding box in pixel indexes
-               // min values: floor(value)
-               // max values: ceil(value)
-               Pixel LU, RD;
-               LU.x = static_cast<int>(std::floor(std::min(std::min(triPixs[0].x, triPixs[1].x), triPixs[2].x)));
-               LU.y = static_cast<int>(std::floor(std::min(std::min(triPixs[0].y, triPixs[1].y), triPixs[2].y)));
-               RD.x = static_cast<int>(std::ceil(std::max(std::max(triPixs[0].x, triPixs[1].x), triPixs[2].x)));
-               RD.y = static_cast<int>(std::ceil(std::max(std::max(triPixs[0].y, triPixs[1].y), triPixs[2].y)));
+                    // sanity check: clamp values to [0; textureSide]
+                    int texSide = static_cast<int>(texParams.textureSide);
+                    LU.x = clamp(LU.x, 0, texSide);
+                    LU.y = clamp(LU.y, 0, texSide);
+                    RD.x = clamp(RD.x, 0, texSide);
+                    RD.y = clamp(RD.y, 0, texSide);
 
-               // sanity check: clamp values to [0; textureSide]
-               int texSide = static_cast<int>(texParams.textureSide);
-               LU.x = clamp(LU.x, 0, texSide);
-               LU.y = clamp(LU.y, 0, texSide);
-               RD.x = clamp(RD.x, 0, texSide);
-               RD.y = clamp(RD.y, 0, texSide);
+                    // iterate over pixels of the triangle's bounding box
+                    for (int y = LU.y; y < RD.y; ++y)
+                    {
+                        for (int x = LU.x; x < RD.x; ++x)
+                        {
+                            Pixel pix(x, y);  // top-left corner of the pixel
+                            Point2d barycCoords;
 
-               // iterate over pixels of the triangle's bounding box
-               for(int y = LU.y; y < RD.y; y++)
-               {
-                   for(int x = LU.x; x < RD.x; x++)
-                   {
-                       Pixel pix(x, y); // top-left corner of the pixel
-                       Point2d barycCoords;
+                            // test if the pixel is inside triangle
+                            // and retrieve its barycentric coordinates
+                            if (!isPixelInTriangle(triPixs, pix, barycCoords))
+                            {
+                                continue;
+                            }
 
-                       // test if the pixel is inside triangle
-                       // and retrieve its barycentric coordinates
-                       if(!isPixelInTriangle(triPixs, pix, barycCoords))
-                       {
-                           continue;
-                       }
+                            // remap 'y' to image coordinates system (inverted Y axis)
+                            const unsigned int y_ = (texParams.textureSide - 1) - y;
+                            // 1D pixel index
+                            unsigned int xyoffset = y_ * texParams.textureSide + x;
+                            // get 3D coordinates
+                            Point3d pt3d = barycentricToCartesian(triPts, barycCoords);
+                            // get 2D coordinates in source image
+                            Point2d pixRC;
+                            mp.getPixelFor3DPoint(&pixRC, pt3d, camId);
+                            // exclude out of bounds pixels
+                            if (!mp.isPixelInImage(pixRC, camId))
+                                continue;
 
-                       // remap 'y' to image coordinates system (inverted Y axis)
-                       const unsigned int y_ = (texParams.textureSide - 1) - y;
-                       // 1D pixel index
-                       unsigned int xyoffset = y_ * texParams.textureSide + x;
-                       // get 3D coordinates
-                       Point3d pt3d = barycentricToCartesian(triPts, barycCoords);
-                       // get 2D coordinates in source image
-                       Point2d pixRC;
-                       mp.getPixelFor3DPoint(&pixRC, pt3d, camId);
-                       // exclude out of bounds pixels
-                       if(!mp.isPixelInImage(pixRC, camId))
-                           continue;
-                       Color color = imageCache.getPixelValueInterpolated(&pixRC, camId);
-                       // If the color is pure zero, we consider it as an invalid pixel.
-                       // After correction of radial distortion, some pixels are invalid.
-                       // TODO: use an alpha channel instead.
-                       if(color == Color(0.f, 0.f, 0.f))
-                           continue;
-                       // fill the accumulated color map for this pixel
-                       accuImage.img[xyoffset] += color;
-                       accuImage.imgCount[xyoffset] += 1;
-                   }
-               }
-           }
+                            // If the color is pure zero (ie. no contributions), we consider it as an invalid pixel.
+                            if (getInterpolateColor(camImg, pixRC.y, pixRC.x) == image::RGBfColor(0.f, 0.f, 0.f))
+                                continue;
+
+                            // Fill the accumulated pyramid for this pixel
+                            // each frequency band also contributes to lower frequencies (higher band indexes)
+                            AccuPyramid& accuPyramid = accuPyramids.at(atlasID);
+                            for (std::size_t bandContrib = band; bandContrib < pyramidL.size(); ++bandContrib)
+                            {
+                                int downscaleCoef = std::pow(texParams.multiBandDownscale, bandContrib);
+                                AccuImage& accuImage = accuPyramid.pyramid[bandContrib];
+
+                                // fill the accumulated color map for this pixel
+                                const auto pixDownscaled = pixRC / downscaleCoef;
+                                accuImage.img(xyoffset) +=
+                                  getInterpolateColor(pyramidL[bandContrib], pixDownscaled.y, pixDownscaled.x) * triangleScore;
+                                accuImage.imgCount[xyoffset] += triangleScore;
+                            }
+                        }
+                    }
+                }
+            }
         }
-        camId++; // increment current cam index
     }
 
-    for(int atlasID = 0; atlasID < accuImages.size(); ++atlasID)
+    // calculate atlas texture in the first level of the pyramid (avoid creating a new buffer)
+    // debug mode : write all the frequencies levels for each texture
+    for (std::size_t atlasID : atlasIDs)
     {
-        AccuImage& accuImage = accuImages.at(atlasID);
+        AccuPyramid& accuPyramid = accuPyramids.at(atlasID);
+        AccuImage& atlasTexture = accuPyramid.pyramid[0];
+        ALICEVISION_LOG_INFO("Create texture " << atlasID + 1);
 
-        ALICEVISION_LOG_INFO("Create texture " << atlasID);
+#if TEXTURING_MBB_DEBUG
+        {
+            // write the number of contribution per atlas frequency bands
+            if (!texParams.useScore)
+            {
+                for (std::size_t level = 0; level < accuPyramid.pyramid.size(); ++level)
+                {
+                    AccuImage& atlasLevelTexture = accuPyramid.pyramid[level];
+
+                    // write the number of contributions for each texture
+                    std::vector<float> imgContrib(textureSize);
+
+                    for (unsigned int yp = 0; yp < texParams.textureSide; ++yp)
+                    {
+                        unsigned int yoffset = yp * texParams.textureSide;
+                        for (unsigned int xp = 0; xp < texParams.textureSide; ++xp)
+                        {
+                            unsigned int xyoffset = yoffset + xp;
+                            imgContrib[xyoffset] = atlasLevelTexture.imgCount[xyoffset];
+                        }
+                    }
+
+                    const std::string textureName = "contrib_" + std::to_string(1001 + atlasID) + std::string("_") + std::to_string(level) +
+                                                    std::string(".") +
+                                                    EImageFileType_enumToString(textureFileType);  // starts at '1001' for UDIM compatibility
+                    fs::path texturePath = outPath / textureName;
+
+                    using namespace imageIO;
+                    OutputFileColorSpace colorspace(EImageColorSpace::SRGB, EImageColorSpace::AUTO);
+                    if (texParams.convertLAB)
+                        colorspace.from = EImageColorSpace::LAB;
+                    writeImage(texturePath.string(), texParams.textureSide, texParams.textureSide, imgContrib, EImageQuality::OPTIMIZED, colorspace);
+                }
+            }
+        }
+#endif
 
         ALICEVISION_LOG_INFO("  - Computing final (average) color.");
-
-        for(unsigned int yp = 0; yp < texParams.textureSide; ++yp)
+        for (unsigned int yp = 0; yp < texParams.textureSide; ++yp)
         {
             unsigned int yoffset = yp * texParams.textureSide;
-            for(unsigned int xp = 0; xp < texParams.textureSide; ++xp)
+            for (unsigned int xp = 0; xp < texParams.textureSide; ++xp)
             {
                 unsigned int xyoffset = yoffset + xp;
-                if(accuImage.imgCount[xyoffset])
-                    accuImage.img[xyoffset] /= accuImage.imgCount[xyoffset];
-            }
-        }
 
-        unsigned int outTextureSide = texParams.textureSide;
+                // If the imgCount is valid on the first band, it will be valid on all the other bands
+                if (atlasTexture.imgCount[xyoffset] == 0)
+                    continue;
 
-        if(!texParams.fillHoles && texParams.padding > 0)
-        {
-            ALICEVISION_LOG_INFO("  - Edge padding (" << texParams.padding << " pixels).");
-            //up-left to bottom-right
-            for(unsigned int y = 1; y < outTextureSide-1; ++y)
-            {
-                unsigned int yoffset = y * outTextureSide;
-                for(unsigned int x = 1; x < outTextureSide-1; ++x)
+                atlasTexture.img(xyoffset) /= atlasTexture.imgCount[xyoffset];
+                atlasTexture.imgCount[xyoffset] = 1;
+
+                for (std::size_t level = 1; level < accuPyramid.pyramid.size(); ++level)
                 {
-                    unsigned int xyoffset = yoffset + x;
-                    const int leftCount = accuImage.imgCount[xyoffset-1];
-                    const int upCount = accuImage.imgCount[xyoffset-outTextureSide];
-
-                    if(accuImage.imgCount[xyoffset] > 0)
-                        continue;
-
-                    if(leftCount > 0)
-                    {
-                        accuImage.img[xyoffset] = accuImage.img[xyoffset-1];
-                        accuImage.imgCount[xyoffset] = - 1;
-                    }
-                    else if(upCount > 0)
-                    {
-                        accuImage.img[xyoffset] = accuImage.img[xyoffset-outTextureSide];
-                        accuImage.imgCount[xyoffset] = - 1;
-                    }
-                    else if(leftCount < 0 && - leftCount < texParams.padding && (upCount == 0 || leftCount > upCount))
-                    {
-                        accuImage.img[xyoffset] = accuImage.img[xyoffset-1];
-                        accuImage.imgCount[xyoffset] = leftCount - 1;
-                    }
-
-                    else if(upCount < 0 && - upCount < texParams.padding)
-                    {
-                        accuImage.img[xyoffset] = accuImage.img[xyoffset-outTextureSide];
-                        accuImage.imgCount[xyoffset] = upCount - 1;
-                    }
-                }
-            }
-            //bottom-right to up-left
-            for(unsigned int y = 1; y < outTextureSide-1; ++y) //change
-            {
-                unsigned int yoffset = (outTextureSide - y) * outTextureSide;
-                for(unsigned int x = 1; x < outTextureSide-1; ++x)
-                {
-                    unsigned int xyoffset = yoffset + (outTextureSide - x);
-                    const int rightCount = accuImage.imgCount[xyoffset+1];
-                    const int leftCount = accuImage.imgCount[xyoffset-1];
-                    const int downCount = accuImage.imgCount[xyoffset+outTextureSide];
-                    const int upCount = accuImage.imgCount[xyoffset-outTextureSide];
-
-                    if(accuImage.imgCount[xyoffset] > 0)
-                        continue;
-
-                    if(rightCount > 0)
-                    {
-                        accuImage.img[xyoffset] = accuImage.img[xyoffset+1];
-                        accuImage.imgCount[xyoffset] = - 1;
-                    }
-                    else if(downCount > 0)
-                    {
-                        accuImage.img[xyoffset] = accuImage.img[xyoffset+outTextureSide];
-                        accuImage.imgCount[xyoffset] = - 1;
-                    }
-                    else if((rightCount < 0 && - rightCount < texParams.padding) &&
-                            (leftCount == 0 || rightCount > leftCount) &&
-                            (downCount == 0 || rightCount >= downCount)
-                            )
-                    {
-                        accuImage.img[xyoffset] = accuImage.img[xyoffset+1];
-                        accuImage.imgCount[xyoffset] = rightCount - 1;
-                    }
-                    else if((downCount < 0 && - downCount < texParams.padding) &&
-                            (upCount == 0 || downCount > upCount)
-                            )
-                    {
-                        accuImage.img[xyoffset] = accuImage.img[xyoffset+outTextureSide];
-                        accuImage.imgCount[xyoffset] = downCount - 1;
-                    }
+                    AccuImage& atlasLevelTexture = accuPyramid.pyramid[level];
+                    atlasLevelTexture.img(xyoffset) /= atlasLevelTexture.imgCount[xyoffset];
                 }
             }
         }
 
-        // texture holes filling
-        if(texParams.fillHoles)
+#if TEXTURING_MBB_DEBUG
         {
-            ALICEVISION_LOG_INFO("  - Filling texture holes.");
-            std::vector<float> alphaBuffer(accuImage.img.size());
-            for(unsigned int yp = 0; yp < texParams.textureSide; ++yp)
+            // write each frequency band, for each texture
+            for (std::size_t level = 0; level < accuPyramid.pyramid.size(); ++level)
             {
-                ALICEVISION_LOG_INFO("  - Filling texture holes.");
-                std::vector<float> alphaBuffer(accuImage.img.size());
-                for(unsigned int yp = 0; yp < texParams.textureSide; ++yp)
+                AccuImage& atlasLevelTexture = accuPyramid.pyramid[level];
+                writeTexture(atlasLevelTexture, atlasID, outPath, textureFileType, level);
+            }
+        }
+#endif
+
+        // Fuse frequency bands into the first buffer, calculate final texture
+        for (unsigned int yp = 0; yp < texParams.textureSide; ++yp)
+        {
+            unsigned int yoffset = yp * texParams.textureSide;
+            for (unsigned int xp = 0; xp < texParams.textureSide; ++xp)
+            {
+                unsigned int xyoffset = yoffset + xp;
+                for (std::size_t level = 1; level < accuPyramid.pyramid.size(); ++level)
                 {
-                    unsigned int yoffset = yp * texParams.textureSide;
-                    for(unsigned int xp = 0; xp < texParams.textureSide; ++xp)
-                    {
-                        unsigned int xyoffset = yoffset + xp;
-                        alphaBuffer[xyoffset] = accuImage.imgCount[xyoffset] ? 1.0f : 0.0f;
-                    }
+                    AccuImage& atlasLevelTexture = accuPyramid.pyramid[level];
+                    atlasTexture.img(xyoffset) += atlasLevelTexture.img(xyoffset);
                 }
-                imageIO::fillHoles(texParams.textureSide, texParams.textureSide, accuImage.img, alphaBuffer);
-                alphaBuffer.clear();
             }
         }
 
-        // downscale texture if required
-        if(texParams.downscale > 1)
+        // If mode "normalMaps"
+        if (imageType == mvsUtils::EFileType::normalMap)
         {
-            std::vector<Color> resizedColorBuffer;
-            outTextureSide = texParams.textureSide / texParams.downscale;
+            Eigen::Matrix<bool, Eigen::Dynamic, Eigen::Dynamic> visitedPixels(atlasTexture.img.rows(), atlasTexture.img.cols());
+            visitedPixels.fill(false);
 
-            ALICEVISION_LOG_INFO("  - Downscaling texture (" << texParams.downscale << "x).");
-            imageIO::resizeImage(texParams.textureSide, texParams.textureSide, texParams.downscale, accuImage.img, resizedColorBuffer);
-            std::swap(resizedColorBuffer, accuImage.img);
+            // Rotation and normalization of normals
+#pragma omp parallel for
+            for (int i = 0; i < static_cast<int>(_atlases[atlasID].size()); ++i)
+            {
+                int triangleId = _atlases[atlasID][i];
+
+                // Retrieve triangle 3D and UV coordinates
+                Point2d triPixs[3];
+                Point3d triPts[3];
+                auto& triangleUvIds = mesh->trisUvIds[triangleId];
+
+                // Retrieve triangle normal
+
+                // Compute the Bottom-Left minima of the current UDIM for [0,1] range remapping
+                Point2d udimBL;
+                StaticVector<Point2d>& uvCoords = mesh->uvCoords;
+                udimBL.x = std::floor(std::min({uvCoords[triangleUvIds[0]].x, uvCoords[triangleUvIds[1]].x, uvCoords[triangleUvIds[2]].x}));
+                udimBL.y = std::floor(std::min({uvCoords[triangleUvIds[0]].y, uvCoords[triangleUvIds[1]].y, uvCoords[triangleUvIds[2]].y}));
+
+                for (int k = 0; k < 3; k++)
+                {
+                    const int pointIndex = (mesh->tris)[triangleId].v[k];
+                    triPts[k] = (mesh->pts)[pointIndex];  // 3D coordinates
+                    const int uvPointIndex = triangleUvIds.m[k];
+
+                    Point2d uv = uvCoords[uvPointIndex];
+                    // UDIM: remap coordinates between [0,1]
+                    uv = uv - udimBL;
+
+                    triPixs[k] = uv * texParams.textureSide;  // UV coordinates
+                }
+
+                // compute triangle bounding box in pixel indexes
+                // min values: floor(value)
+                // max values: ceil(value)
+                Pixel LU, RD;
+                LU.x = static_cast<int>(std::floor(std::min({triPixs[0].x, triPixs[1].x, triPixs[2].x})));
+                LU.y = static_cast<int>(std::floor(std::min({triPixs[0].y, triPixs[1].y, triPixs[2].y})));
+                RD.x = static_cast<int>(std::ceil(std::max({triPixs[0].x, triPixs[1].x, triPixs[2].x})));
+                RD.y = static_cast<int>(std::ceil(std::max({triPixs[0].y, triPixs[1].y, triPixs[2].y})));
+
+                // sanity check: clamp values to [0; textureSide]
+                int texSide = static_cast<int>(texParams.textureSide);
+                LU.x = clamp(LU.x, 0, texSide);
+                LU.y = clamp(LU.y, 0, texSide);
+                RD.x = clamp(RD.x, 0, texSide);
+                RD.y = clamp(RD.y, 0, texSide);
+
+                const Eigen::Matrix3d worldToTriangleMatrix = computeTriangleTransform(*mesh, triangleId, triPixs);
+
+                // iterate over bounding box's pixels
+                for (int y = LU.y; y < RD.y; ++y)
+                {
+                    for (int x = LU.x; x < RD.x; ++x)
+                    {
+                        Pixel pix(x, y);  // top-left corner of the pixel
+                        Point2d barycCoords;
+
+                        // test if the pixel is inside triangle
+                        // and retrieve its barycentric coordinates
+                        const double margin = 0.5;
+                        if (!isPixelInTriangle(triPixs, pix, barycCoords, margin))
+                        {
+                            continue;
+                        }
+
+                        // remap 'y' to image coordinates system (inverted Y axis)
+                        const unsigned int y_ = (texParams.textureSide - 1) - y;
+                        // 1D pixel index
+                        const unsigned int xyoffset = y_ * texParams.textureSide + x;
+
+                        /*
+                        // get 3D coordinates
+                        const Point3d pt3d = barycentricToCartesian(triPts, barycCoords);
+                        const GEO::vec3 q(pt3d.x, pt3d.y, pt3d.z);
+
+                        // Texel normal (weighted normal from the 3 vertices normals), instead of face normal for better
+                        // transitions (reduce seams)
+                        const GEO::vec3 triangleNormal_p = mesh_facet_interpolate_normal_at_point(sparseMesh, triangleId, q);
+                        // const GEO::vec3 triangleNormal_p = GEO::vec3(triangleNormal.m); // to use the triangle normal instead
+                        const GEO::vec3 scaledTriangleNormal = triangleNormal_p * minEdgeLength * 10; // ??????
+
+                        */
+
+                        Vec3 origNormal = atlasTexture.img(xyoffset).cast<double>();
+                        if (visitedPixels(x, y))
+                        {
+                            continue;
+                        }
+                        visitedPixels(x, y) = true;
+
+                        origNormal = worldToTriangleMatrix * origNormal;
+                        origNormal.normalize();
+
+                        origNormal = origNormal * 0.5 + Vec3(0.5, 0.5, 0.5);  // Normal in visual representation
+                        atlasTexture.img(xyoffset) = image::RGBfColor(origNormal[0], origNormal[1], origNormal[2]);
+                    }
+                }
+            }
         }
-
-        const std::string textureName = "texture_" + std::to_string(1001 + atlasID) + "." + EImageFileType_enumToString(textureFileType); // starts at '1001' for UDIM compatibility
-        bfs::path texturePath = outPath / textureName;
-        ALICEVISION_LOG_INFO("  - Writing texture file: " << texturePath.string());
-        imageIO::writeImage(texturePath.string(), outTextureSide, outTextureSide, accuImage.img, imageIO::EImageQuality::OPTIMIZED, imageIO::EImageColorSpace::AUTO);
+        writeTexture(atlasTexture, atlasID, outPath, textureFileType, -1, imageType);
     }
 }
 
+void Texturing::generateNormalAndHeightMaps(const mvsUtils::MultiViewParams& mp,
+                                            const Mesh& denseMesh,
+                                            const fs::path& outPath,
+                                            const mesh::BumpMappingParams& bumpMappingParams)
+{
+    GEO::Mesh geoDenseMesh;
+    toGeoMesh(denseMesh, geoDenseMesh);
+    GEO::compute_normals(geoDenseMesh);
+    GEO::MeshFacetsAABB denseMeshAABB(geoDenseMesh);  // warning: mesh_reorder called inside
+
+    GEO::Mesh geoSparseMesh;
+    toGeoMesh(*mesh, geoSparseMesh);
+    GEO::compute_normals(geoSparseMesh);
+
+    mvsUtils::ImagesCache<image::Image<image::RGBfColor>> imageCache(mp, image::EImageColorSpace::NO_CONVERSION);
+
+    for (size_t atlasID = 0; atlasID < _atlases.size(); ++atlasID)
+        _generateNormalAndHeightMaps(mp, denseMeshAABB, geoSparseMesh, atlasID, imageCache, outPath, bumpMappingParams);
+}
+
+void Texturing::writeTexture(AccuImage& atlasTexture,
+                             const std::size_t atlasID,
+                             const std::filesystem::path& outPath,
+                             image::EImageFileType textureFileType,
+                             const int level,
+                             mvsUtils::EFileType imageType)
+{
+    unsigned int outTextureSide = texParams.textureSide;
+    // WARNING: we modify the "imgCount" to apply the padding (to avoid the creation of a new buffer)
+    // edge padding (dilate gutter)
+    if (!texParams.fillHoles && texParams.padding > 0 && level < 0)
+    {
+        const unsigned int padding = texParams.padding * 3;
+        ALICEVISION_LOG_INFO("  - Edge padding (" << padding << " pixels).");
+
+        // Init valid values to 1
+        for (unsigned int y = 0; y < outTextureSide; ++y)
+        {
+            unsigned int yoffset = y * outTextureSide;
+            for (unsigned int x = 0; x < outTextureSide; ++x)
+            {
+                unsigned int xyoffset = yoffset + x;
+                if (atlasTexture.imgCount[xyoffset] > 0)
+                    atlasTexture.imgCount[xyoffset] = 1;
+            }
+        }
+
+        // up-left to bottom-right
+        for (unsigned int y = 1; y < outTextureSide - 1; ++y)
+        {
+            unsigned int yoffset = y * outTextureSide;
+            for (unsigned int x = 1; x < outTextureSide - 1; ++x)
+            {
+                unsigned int xyoffset = yoffset + x;
+                if (atlasTexture.imgCount[xyoffset] > 0)
+                    continue;
+
+                const int upCount = atlasTexture.imgCount[xyoffset - outTextureSide];
+                const int leftCount = atlasTexture.imgCount[xyoffset - 1];
+                // if pixel on the edge of a chart
+                if (leftCount > 0)
+                {
+                    atlasTexture.img(xyoffset) = atlasTexture.img(xyoffset - 1);
+                    atlasTexture.imgCount[xyoffset] = -1;
+                }
+                else if (upCount > 0)
+                {
+                    atlasTexture.img(xyoffset) = atlasTexture.img(xyoffset - outTextureSide);
+                    atlasTexture.imgCount[xyoffset] = -1;
+                }
+                //
+                else if (leftCount < 0 && -leftCount < padding && (upCount == 0 || leftCount > upCount))
+                {
+                    atlasTexture.img(xyoffset) = atlasTexture.img(xyoffset - 1);
+                    atlasTexture.imgCount[xyoffset] = leftCount - 1;
+                }
+                else if (upCount < 0 && -upCount < padding)
+                {
+                    atlasTexture.img(xyoffset) = atlasTexture.img(xyoffset - outTextureSide);
+                    atlasTexture.imgCount[xyoffset] = upCount - 1;
+                }
+            }
+        }
+
+        // bottom-right to up-left
+        for (unsigned int y = 1; y < outTextureSide - 1; ++y)
+        {
+            unsigned int yoffset = (outTextureSide - 1 - y) * outTextureSide;
+            for (unsigned int x = 1; x < outTextureSide - 1; ++x)
+            {
+                unsigned int xyoffset = yoffset + (outTextureSide - 1 - x);
+                if (atlasTexture.imgCount[xyoffset] > 0)
+                    continue;
+
+                const int upCount = atlasTexture.imgCount[xyoffset - outTextureSide];
+                const int downCount = atlasTexture.imgCount[xyoffset + outTextureSide];
+                const int rightCount = atlasTexture.imgCount[xyoffset + 1];
+                const int leftCount = atlasTexture.imgCount[xyoffset - 1];
+                if (rightCount > 0)
+                {
+                    atlasTexture.img(xyoffset) = atlasTexture.img(xyoffset + 1);
+                    atlasTexture.imgCount[xyoffset] = -1;
+                }
+                else if (downCount > 0)
+                {
+                    atlasTexture.img(xyoffset) = atlasTexture.img(xyoffset + outTextureSide);
+                    atlasTexture.imgCount[xyoffset] = -1;
+                }
+                else if ((rightCount < 0 && -rightCount < padding) && (leftCount == 0 || rightCount > leftCount) &&
+                         (downCount == 0 || rightCount >= downCount))
+                {
+                    atlasTexture.img(xyoffset) = atlasTexture.img(xyoffset + 1);
+                    atlasTexture.imgCount[xyoffset] = rightCount - 1;
+                }
+                else if ((downCount < 0 && -downCount < padding) && (upCount == 0 || downCount > upCount))
+                {
+                    atlasTexture.img(xyoffset) = atlasTexture.img(xyoffset + outTextureSide);
+                    atlasTexture.imgCount[xyoffset] = downCount - 1;
+                }
+            }
+        }
+    }
+
+    // texture holes filling
+    if (texParams.fillHoles)
+    {
+        ALICEVISION_LOG_INFO("  - Filling texture holes.");
+        std::vector<float> alphaBuffer(atlasTexture.img.size());
+        for (unsigned int yp = 0; yp < texParams.textureSide; ++yp)
+        {
+            unsigned int yoffset = yp * texParams.textureSide;
+            for (unsigned int xp = 0; xp < texParams.textureSide; ++xp)
+            {
+                unsigned int xyoffset = yoffset + xp;
+                alphaBuffer[xyoffset] = atlasTexture.imgCount[xyoffset] ? 1 : 0;
+            }
+        }
+        imageAlgo::fillHoles(atlasTexture.img, alphaBuffer);
+        alphaBuffer.clear();
+    }
+
+    // downscale texture if required
+    if (texParams.downscale > 1)
+    {
+        image::Image<image::RGBfColor> resizedColorBuffer;
+
+        ALICEVISION_LOG_INFO("  - Downscaling texture (" << texParams.downscale << "x).");
+        imageAlgo::resizeImage(texParams.downscale, atlasTexture.img, resizedColorBuffer);
+
+        // Normalize normal map after dowscaling
+        /*if(imageType == mvsUtils::EFileType::normalMap)
+        {
+            for(int i = 0; i < resizedColorBuffer.size(); ++i)
+            {
+                resizedColorBuffer(i).normalize();
+            }
+        }*/
+
+        std::swap(resizedColorBuffer, atlasTexture.img);
+    }
+
+    std::string textureName;
+    if (imageType == mvsUtils::EFileType::normalMap)
+    {
+        material.bumpType = textureFileType;
+        textureName = material.textureName(Material::TextureType::BUMP, static_cast<int>(atlasID));
+        material.addTexture(Material::TextureType::BUMP, textureName);
+    }
+    else
+    {
+        material.diffuseType = textureFileType;
+        textureName = material.textureName(Material::TextureType::DIFFUSE, static_cast<int>(atlasID));
+        material.addTexture(Material::TextureType::DIFFUSE, textureName);
+    }
+
+    const fs::path texturePath = outPath / textureName;
+    ALICEVISION_LOG_INFO("  - Writing texture file: " << texturePath.string());
+
+    image::writeImage(texturePath.string(),
+                      atlasTexture.img,
+                      image::ImageWriteOptions()
+                        .fromColorSpace(texParams.workingColorSpace)
+                        .toColorSpace(texParams.outputColorSpace)
+                        .storageDataType(image::EStorageDataType::Half));
+}
 
 void Texturing::clear()
 {
-    trisMtlIds.clear();
-    uvCoords.clear();
-    trisUvIds.clear();
-    normals.clear();
-    trisNormalsIds.clear();
-    _atlases.clear();
-
-    if(pointsVisibilities != nullptr)
-    {
-        deleteArrayOfArrays<int>(&pointsVisibilities);
-        pointsVisibilities = nullptr;
-    }
-
-    delete me;
-    me = nullptr;
+    delete mesh;
+    mesh = nullptr;
+    material.clear();
 }
 
-void Texturing::loadFromOBJ(const std::string& filename, bool flipNormals)
+void Texturing::loadWithAtlas(const std::string& filepath, bool flipNormals)
 {
     // Clear internal data
     clear();
-    me = new Mesh();
+    mesh = new Mesh();
     // Load .obj
-    if(!me->loadFromObjAscii(nmtls, trisMtlIds, normals, trisNormalsIds, uvCoords, trisUvIds,
-                             filename.c_str()))
-    {
-        throw std::runtime_error("Unable to load: " + filename);
-    }
+    mesh->load(filepath);
 
     // Handle normals flipping
-    if(flipNormals)
-        me->invertTriangleOrientations();
+    if (flipNormals)
+        mesh->invertTriangleOrientations();
 
     // Fill atlases (1 atlas per material) with corresponding rectangles
     // if no material, create only one atlas with all triangles
-    _atlases.resize(std::max(1, nmtls));
-    for(int triangleID = 0; triangleID < trisMtlIds.size(); triangleID++)
+    _atlases.resize(std::max(1, mesh->nmtls));
+    for (int triangleID = 0; triangleID < mesh->trisMtlIds().size(); ++triangleID)
     {
-        unsigned int atlasID = nmtls ? trisMtlIds[triangleID] : 0;
+        unsigned int atlasID = mesh->nmtls ? mesh->trisMtlIds()[triangleID] : 0;
         _atlases[atlasID].push_back(triangleID);
     }
 }
 
-void Texturing::remapVisibilities(EVisibilityRemappingMethod remappingMethod, const Mesh& refMesh, const mesh::PointsVisibility& refPointsVisibilities)
+void Texturing::loadWithMaterial(const std::string& filepath, bool flipNormals)
 {
-  assert(pointsVisibilities == nullptr);
-  pointsVisibilities = new mesh::PointsVisibility();
+    clear();
 
-  // remap visibilities from the reference onto the mesh
-  if(remappingMethod == EVisibilityRemappingMethod::PullPush || remappingMethod == mesh::EVisibilityRemappingMethod::Pull)
-    remapMeshVisibilities_pullVerticesVisibility(refMesh, refPointsVisibilities, *me, *pointsVisibilities);
-  if(remappingMethod == EVisibilityRemappingMethod::PullPush || remappingMethod == mesh::EVisibilityRemappingMethod::Push)
-    remapMeshVisibilities_pushVerticesVisibilityToTriangles(refMesh, refPointsVisibilities, *me, *pointsVisibilities);
-  if(pointsVisibilities->empty())
-    throw std::runtime_error("No visibility after visibility remapping.");
+    mesh = new Mesh();
+    mesh->load(filepath, true, &material);
+
+    if (flipNormals)
+    {
+        mesh->invertTriangleOrientations();
+    }
+
+    _atlases.resize(std::max(1, mesh->nmtls));
+    for (int triangleID = 0; triangleID < mesh->trisMtlIds().size(); ++triangleID)
+    {
+        unsigned int atlasID = mesh->nmtls ? mesh->trisMtlIds()[triangleID] : 0;
+        _atlases[atlasID].push_back(triangleID);
+    }
+}
+
+void Texturing::remapVisibilities(EVisibilityRemappingMethod remappingMethod, const mvsUtils::MultiViewParams& mp, const Mesh& refMesh)
+{
+    if (refMesh.pointsVisibilities.empty() &&
+        (remappingMethod & mesh::EVisibilityRemappingMethod::Pull || remappingMethod & mesh::EVisibilityRemappingMethod::Push))
+    {
+        throw std::runtime_error("Texturing: Cannot remap visibilities as there is no reference points.");
+    }
+
+    // remap visibilities from the reference onto the mesh
+    if (remappingMethod & mesh::EVisibilityRemappingMethod::Pull)
+    {
+        remapMeshVisibilities_pullVerticesVisibility(refMesh, *mesh);
+    }
+    if (remappingMethod & mesh::EVisibilityRemappingMethod::Push)
+    {
+        remapMeshVisibilities_pushVerticesVisibilityToTriangles(refMesh, *mesh);
+    }
+    if (remappingMethod & EVisibilityRemappingMethod::MeshItself)
+    {
+        remapMeshVisibilities_meshItself(mp, *mesh);
+    }
+    if (mesh->pointsVisibilities.empty())
+    {
+        throw std::runtime_error("No visibility after visibility remapping.");
+    }
 }
 
 void Texturing::replaceMesh(const std::string& otherMeshPath, bool flipNormals)
 {
     // keep previous mesh/visibilities as reference
-    Mesh* refMesh = me;
-    PointsVisibility* refVisibilities = pointsVisibilities;
+    Mesh* refMesh = mesh;
     // set pointers to null to avoid deallocation by 'loadFromObj'
-    me = nullptr;
-    pointsVisibilities = nullptr;
+    mesh->pointsVisibilities.resize(0);
+    mesh = nullptr;
+
     // load input obj file
-    loadFromOBJ(otherMeshPath, flipNormals);
+    loadWithAtlas(otherMeshPath, flipNormals);
     // allocate pointsVisibilities for new internal mesh
-    pointsVisibilities = new PointsVisibility();
+    mesh->pointsVisibilities = PointsVisibility();
     // remap visibilities from reconstruction onto input mesh
-    if(texParams.visibilityRemappingMethod & EVisibilityRemappingMethod::Pull)
-        remapMeshVisibilities_pullVerticesVisibility(*refMesh, *refVisibilities, *me, *pointsVisibilities);
+    if (texParams.visibilityRemappingMethod & EVisibilityRemappingMethod::Pull)
+        remapMeshVisibilities_pullVerticesVisibility(*refMesh, *mesh);
     if (texParams.visibilityRemappingMethod & EVisibilityRemappingMethod::Push)
-        remapMeshVisibilities_pushVerticesVisibilityToTriangles(*refMesh, *refVisibilities, *me, *pointsVisibilities);
-    if(pointsVisibilities->empty())
+        remapMeshVisibilities_pushVerticesVisibilityToTriangles(*refMesh, *mesh);
+    if (mesh->pointsVisibilities.empty())
         throw std::runtime_error("No visibility after visibility remapping.");
 
     // delete ref mesh and visibilities
     delete refMesh;
-    deleteArrayOfArrays(&refVisibilities);
 }
 
 void Texturing::unwrap(mvsUtils::MultiViewParams& mp, EUnwrapMethod method)
 {
-    if(method == mesh::EUnwrapMethod::Basic)
+    if (method == mesh::EUnwrapMethod::Basic)
     {
         // generate UV coordinates based on automatic uv atlas
         generateUVsBasicMethod(mp);
@@ -791,14 +1270,14 @@ void Texturing::unwrap(mvsUtils::MultiViewParams& mp, EUnwrapMethod method)
     else
     {
         GEO::initialize();
-        GEO::Mesh mesh;
-        toGeoMesh(*me, mesh);
+        GEO::Mesh geoMesh;
+        toGeoMesh(*mesh, geoMesh);
 
         // perform parametrization with Geogram
         const GEO::ChartParameterizer param = (method == mesh::EUnwrapMethod::ABF) ? GEO::PARAM_ABF : GEO::PARAM_SPECTRAL_LSCM;
 
         ALICEVISION_LOG_INFO("Start mesh atlasing (using Geogram " << EUnwrapMethod_enumToString(method) << ").");
-        GEO::mesh_make_atlas(mesh, 45.0, param);
+        GEO::mesh_make_atlas(geoMesh, 45.0, param);
         ALICEVISION_LOG_INFO("Mesh atlasing done.");
 
         // TODO: retrieve computed UV coordinates and find a way to update internal data
@@ -810,95 +1289,444 @@ void Texturing::unwrap(mvsUtils::MultiViewParams& mp, EUnwrapMethod method)
         // Meanwhile,
         // use a temporary obj file to save result - Geogram merges common UV coordinates per facet corner -
         // and reload it
-        const std::string tmpObjPath = (bfs::temp_directory_path() / bfs::unique_path()).string() + ".obj";
+        const std::string tmpObjPath = (fs::temp_directory_path() / fs::path(utils::generateUniqueFilename())).string() + ".obj";
         // save temp mesh with UVs
-        GEO::mesh_save(mesh, tmpObjPath);
+        GEO::mesh_save(geoMesh, tmpObjPath);
         // replace initial mesh
         replaceMesh(tmpObjPath);
         // remove temp mesh
-        bfs::remove(tmpObjPath);
+        fs::remove(tmpObjPath);
     }
 }
 
-void Texturing::saveAsOBJ(const bfs::path& dir, const std::string& basename, EImageFileType textureFileType)
+void Texturing::saveAs(const fs::path& dir, const std::string& basename, EFileType meshFileType)
 {
-    ALICEVISION_LOG_INFO("Writing obj and mtl file.");
+    const std::string meshFileTypeStr = EFileType_enumToString(meshFileType);
+    const std::string filepath = (dir / (basename + "." + meshFileTypeStr)).string();
 
-    std::string objFilename = (dir / (basename + ".obj")).string();
-    std::string mtlName = (basename + ".mtl");
-    std::string mtlFilename = (dir / mtlName).string();
+    ALICEVISION_LOG_INFO("Saving " << meshFileTypeStr << " mesh file using Assimp.");
 
-    // create .OBJ file
-    FILE* fobj = fopen(objFilename.c_str(), "w");
+    if (_atlases.empty())
+    {
+        ALICEVISION_LOG_ERROR("No texture atlases available. Cannot save mesh.");
+        return;
+    }
 
-    // header
-    fprintf(fobj, "# \n");
-    fprintf(fobj, "# Wavefront OBJ file\n");
-    fprintf(fobj, "# Created with AliceVision\n");
-    fprintf(fobj, "# \n");
-    fprintf(fobj, "mtllib %s\n\n", mtlName.c_str());
-    fprintf(fobj, "g TexturedMesh\n");
+    // Assimp scene setup
+    // create scene and root node
+    aiScene scene;
+    scene.mRootNode = new aiNode();
 
-    // write vertices
-    auto vertices = me->pts;
-    for(int i = 0; i < vertices->size(); ++i)
-        fprintf(fobj, "v %f %f %f\n", (*vertices)[i].x, (*vertices)[i].y, (*vertices)[i].z);
+    // create material array
+    scene.mMaterials = new aiMaterial*[_atlases.size()];
+    scene.mNumMaterials = _atlases.size();
 
-    // write UV coordinates
-    for(int i=0; i < uvCoords.size(); ++i)
-        fprintf(fobj, "vt %f %f\n", uvCoords[i].x, uvCoords[i].y);
+    // create mesh array
+    scene.mMeshes = new aiMesh*[_atlases.size()];
+    scene.mNumMeshes = _atlases.size();
+
+    // link mesh array to root node
+    scene.mRootNode->mMeshes = new unsigned int[_atlases.size()];
+    scene.mRootNode->mNumMeshes = _atlases.size();
+
+    // define shared material properties
+    const aiVector3D valcolor = {material.diffuse.r, material.diffuse.g, material.diffuse.b};
+    const aiVector3D valambient = {material.ambient.r, material.ambient.g, material.ambient.b};
+    const aiVector3D valspecular = {material.specular.r, material.specular.g, material.specular.b};
+    const double shininess = material.shininess;
+
+    // get any previously generated textures
+    const StaticVector<std::string>& diffuseTextures = material.getTextures(Material::TextureType::DIFFUSE);
+    const StaticVector<std::string>& normalTextures = material.getTextures(Material::TextureType::NORMAL);
+    const StaticVector<std::string>& bumpTextures = material.getTextures(Material::TextureType::BUMP);
+    const StaticVector<std::string>& displacementTextures = material.getTextures(Material::TextureType::DISPLACEMENT);
 
     // write faces per texture atlas
-    for(std::size_t atlasId=0; atlasId < _atlases.size(); ++atlasId)
+    for (int atlasId = 0; atlasId < _atlases.size(); ++atlasId)
     {
-        const std::size_t textureId = 1001 + atlasId; // starts at '1001' for UDIM compatibility
-        fprintf(fobj, "usemtl TextureAtlas_%i\n", textureId);
-        for(const auto triangleID : _atlases[atlasId])
+        // Set material for this atlas
+        const aiString texName("material_" + Material::textureId(atlasId));
+
+        scene.mMaterials[atlasId] = new aiMaterial();
+        scene.mMaterials[atlasId]->AddProperty(&valcolor, 1, AI_MATKEY_COLOR_DIFFUSE);
+        scene.mMaterials[atlasId]->AddProperty(&valambient, 1, AI_MATKEY_COLOR_AMBIENT);
+        scene.mMaterials[atlasId]->AddProperty(&valspecular, 1, AI_MATKEY_COLOR_SPECULAR);
+        scene.mMaterials[atlasId]->AddProperty(&shininess, 1, AI_MATKEY_SHININESS);
+        scene.mMaterials[atlasId]->AddProperty(&texName, AI_MATKEY_NAME);
+
+        // Color Mapping
+        if (diffuseTextures.size() == _atlases.size())
         {
-            // vertex IDs
-            int vertexID1 = (*me->tris)[triangleID].v[0];
-            int vertexID2 = (*me->tris)[triangleID].v[1];
-            int vertexID3 = (*me->tris)[triangleID].v[2];
+            const aiString texFile(diffuseTextures[atlasId]);
+            scene.mMaterials[atlasId]->AddProperty(&texFile, AI_MATKEY_TEXTURE_DIFFUSE(0));
+        }
 
-            int uvID1 = trisUvIds[triangleID].m[0];
-            int uvID2 = trisUvIds[triangleID].m[1];
-            int uvID3 = trisUvIds[triangleID].m[2];
+        // Displacement Mapping
+        if (displacementTextures.size() == _atlases.size())
+        {
+            const aiString texFileHeightMap(displacementTextures[atlasId]);
+            scene.mMaterials[atlasId]->AddProperty(&texFileHeightMap, AI_MATKEY_TEXTURE_DISPLACEMENT(0));
+        }
 
-            fprintf(fobj, "f %i/%i %i/%i %i/%i\n", vertexID1 + 1, uvID1 + 1, vertexID2 + 1, uvID2 + 1, vertexID3 + 1, uvID3 + 1); // indexed from 1
+        // Normal Mapping
+        if (normalTextures.size() == _atlases.size())
+        {
+            const aiString texFileNormalMap(normalTextures[atlasId]);
+            scene.mMaterials[atlasId]->AddProperty(&texFileNormalMap, AI_MATKEY_TEXTURE_NORMALS(0));
+        }
+
+        // Bump Mapping
+        if (bumpTextures.size() == _atlases.size())
+        {
+            const aiString texFileHeightMap(bumpTextures[atlasId]);
+            scene.mMaterials[atlasId]->AddProperty(&texFileHeightMap, AI_MATKEY_TEXTURE_HEIGHT(0));
+        }
+
+        scene.mRootNode->mMeshes[atlasId] = atlasId;
+        scene.mMeshes[atlasId] = new aiMesh();
+        aiMesh* aimesh = scene.mMeshes[atlasId];
+        aimesh->mMaterialIndex = atlasId;
+        aimesh->mNumUVComponents[0] = 2;
+
+        if (meshFileType == EFileType::GLTF || meshFileType == EFileType::GLB)
+        {
+            // set primitive types to triangles, required for gltf and glb export
+            // for other file types, primitive types is unspecified to avoid normal generation 
+            aimesh->mPrimitiveTypes = aiPrimitiveType_TRIANGLE;
+        }
+
+        // Assimp does not allow vertex indices different from uv indices
+        // So we need to group and duplicate
+        std::map<std::pair<int, int>, int> unique_pairs;
+        for (const auto triangleID : _atlases[atlasId])
+        {
+            for (int k = 0; k < 3; ++k)
+            {
+                int vertexId = mesh->tris[triangleID].v[k];
+                int uvId = mesh->trisUvIds[triangleID].m[k];
+
+                std::pair<int, int> p = std::make_pair(vertexId, uvId);
+                unique_pairs[p] = -1;
+            }
+        }
+
+        aimesh->mNumVertices = unique_pairs.size();
+        aimesh->mVertices = new aiVector3D[unique_pairs.size()];
+
+        if (hasUVs())
+        {
+            aimesh->mTextureCoords[0] = new aiVector3D[unique_pairs.size()];
+        }
+
+        int index = 0;
+        for (auto& p : unique_pairs)
+        {
+            const int vertexId = p.first.first;
+
+            aimesh->mVertices[index].x = mesh->pts[vertexId].x;
+            aimesh->mVertices[index].y = -mesh->pts[vertexId].y;
+            aimesh->mVertices[index].z = -mesh->pts[vertexId].z;
+
+            if (hasUVs())
+            {
+                const int uvId = p.first.second;
+
+                aimesh->mTextureCoords[0][index].x = mesh->uvCoords[uvId].x;
+                aimesh->mTextureCoords[0][index].y = mesh->uvCoords[uvId].y;
+                aimesh->mTextureCoords[0][index].z = 0.0;
+            }
+
+            p.second = index;
+            ++index;
+        }
+
+        aimesh->mNumFaces = _atlases[atlasId].size();
+        aimesh->mFaces = new aiFace[aimesh->mNumFaces];
+
+        for (int i = 0; i < _atlases[atlasId].size(); ++i)
+        {
+            const int triangleId = _atlases[atlasId][i];
+
+            aimesh->mFaces[i].mNumIndices = 3;
+            aimesh->mFaces[i].mIndices = new unsigned int[3];
+
+            for (int k = 0; k < 3; ++k)
+            {
+                const int vertexId = mesh->tris[triangleId].v[k];
+                const int uvId = mesh->trisUvIds[triangleId].m[k];
+
+                const std::pair<int, int> p = std::make_pair(vertexId, uvId);
+                aimesh->mFaces[i].mIndices[k] = unique_pairs[p];
+            }
         }
     }
-    fclose(fobj);
 
-    // create .MTL material file
-    FILE* fmtl = fopen(mtlFilename.c_str(), "w");
-
-    // header
-    fprintf(fmtl, "# \n");
-    fprintf(fmtl, "# Wavefront material file\n");
-    fprintf(fmtl, "# Created with AliceVision\n");
-    fprintf(fmtl, "# \n\n");
-
-    // for each atlas, create a new material with associated texture
-    for(size_t atlasId=0; atlasId < _atlases.size(); ++atlasId)
+    // exporter setup
+    std::string pFormatId = meshFileTypeStr;
+    unsigned int pPreprocessing = 0u;
+    
+    if (meshFileType == EFileType::GLTF || meshFileType == EFileType::GLB)
     {
-        const std::size_t textureId = 1001 + atlasId; // starts at '1001' for UDIM compatibility
-        const std::string textureName = "texture_" + std::to_string(textureId) + "." + EImageFileType_enumToString(textureFileType);
+        if (meshFileType == EFileType::GLTF)
+        {
+            // gltf file, use gltf 2.0
+            pFormatId = "gltf2";
+        }
+        else
+        {
+            // glb file, use glb 2.0
+            pFormatId = "glb2";
+        }
 
-        fprintf(fmtl, "newmtl TextureAtlas_%i\n", textureId);
-        fprintf(fmtl, "Ka  0.6 0.6 0.6\n");
-        fprintf(fmtl, "Kd  0.6 0.6 0.6\n");
-        fprintf(fmtl, "Ks  0.0 0.0 0.0\n");
-        fprintf(fmtl, "d  1.0\n");
-        fprintf(fmtl, "Ns  0.0\n");
-        fprintf(fmtl, "illum 2\n");
-        fprintf(fmtl, "map_Kd %s\n", textureName.c_str());
+        // flip UVs when exporting (issue with UV origin for gltf2)
+        // https://github.com/around-media/ue4-custom-prompto/commit/044dbad90fc2172f4c5a8b67c779b80ceace5e1e
+        // pPreprocessing |= aiProcess_FlipUVs;
+        
+        // gen normals in order to have correct shading in Qt 3D Scene
+        // but cause problems with assimp importer
+        pPreprocessing |= aiProcess_GenNormals;
     }
-    fclose(fmtl);
 
-    ALICEVISION_LOG_INFO("Writing done: " << std::endl
-                         << "\t- obj file: " << objFilename << std::endl
-                         << "\t- mtl file: " << mtlFilename);
+    // export mesh
+    Assimp::Exporter exporter;
+    const aiReturn ret = exporter.Export(&scene, pFormatId, filepath, pPreprocessing);
+
+    // check for errors
+    if (ret != AI_SUCCESS)
+    {
+        if (ret == AI_OUTOFMEMORY)
+        {
+            ALICEVISION_LOG_ERROR("Assimp exporter ran out of memory while exporting mesh to " << filepath);
+        }
+
+        ALICEVISION_THROW_ERROR("Assimp exporter failed to export mesh to " << filepath << ", error: " << exporter.GetErrorString());
+        return;
+    }
+
+    ALICEVISION_LOG_INFO("Mesh saved.");
 }
 
-} // namespace mesh
-} // namespace aliceVision
+void Texturing::_generateNormalAndHeightMaps(const mvsUtils::MultiViewParams& mp,
+                                             const GEO::MeshFacetsAABB& denseMeshAABB,
+                                             const GEO::Mesh& sparseMesh,
+                                             size_t atlasID,
+                                             mvsUtils::ImagesCache<image::Image<image::RGBfColor>>& imageCache,
+                                             const fs::path& outPath,
+                                             const mesh::BumpMappingParams& bumpMappingParams)
+{
+    ALICEVISION_LOG_INFO("Generating Height and Normal Maps for atlas " << atlasID + 1 << "/" << _atlases.size() << " (" << _atlases[atlasID].size()
+                                                                        << " triangles).");
+
+    image::Image<image::RGBfColor> normalMap(texParams.textureSide, texParams.textureSide);
+    image::Image<float> heightMap(texParams.textureSide, texParams.textureSide);
+    const auto& triangles = _atlases[atlasID];
+
+    // iterate over atlas' triangles
+#pragma omp parallel for
+    for (int ti = 0; ti < triangles.size(); ++ti)
+    {
+        const unsigned int triangleId = triangles[ti];
+        //  const Point3d __triangleNormal_ = me->computeTriangleNormal(triangleId).normalize();
+        //  const GEO::vec3 __triangleNormal(__triangleNormal_.x, __triangleNormal_.y, __triangleNormal_.z);
+        const double minEdgeLength = mesh->computeTriangleMinEdgeLength(triangleId);
+        // const GEO::vec3 scaledTriangleNormal = triangleNormal * minEdgeLength;
+
+        // retrieve triangle 3D and UV coordinates
+        Point2d triPixs[3];
+        Point3d triPts[3];
+        auto& triangleUvIds = mesh->trisUvIds[triangleId];
+
+        // compute the Bottom-Left minima of the current UDIM for [0,1] range remapping
+        Point2d udimBL;
+        StaticVector<Point2d>& uvCoords = mesh->uvCoords;
+        udimBL.x = std::floor(std::min({uvCoords[triangleUvIds[0]].x, uvCoords[triangleUvIds[1]].x, uvCoords[triangleUvIds[2]].x}));
+        udimBL.y = std::floor(std::min({uvCoords[triangleUvIds[0]].y, uvCoords[triangleUvIds[1]].y, uvCoords[triangleUvIds[2]].y}));
+
+        for (int k = 0; k < 3; k++)
+        {
+            const int pointIndex = (mesh->tris)[triangleId].v[k];
+            triPts[k] = (mesh->pts)[pointIndex];  // 3D coordinates
+            const int uvPointIndex = triangleUvIds.m[k];
+
+            Point2d uv = uvCoords[uvPointIndex];
+            // UDIM: remap coordinates between [0,1]
+            uv = uv - udimBL;
+
+            triPixs[k] = uv * texParams.textureSide;  // UV coordinates
+        }
+
+        // compute triangle bounding box in pixel indexes
+        // min values: floor(value)
+        // max values: ceil(value)
+        Pixel LU, RD;
+        LU.x = static_cast<int>(std::floor(std::min({triPixs[0].x, triPixs[1].x, triPixs[2].x})));
+        LU.y = static_cast<int>(std::floor(std::min({triPixs[0].y, triPixs[1].y, triPixs[2].y})));
+        RD.x = static_cast<int>(std::ceil(std::max({triPixs[0].x, triPixs[1].x, triPixs[2].x})));
+        RD.y = static_cast<int>(std::ceil(std::max({triPixs[0].y, triPixs[1].y, triPixs[2].y})));
+
+        // sanity check: clamp values to [0; textureSide]
+        int texSide = static_cast<int>(texParams.textureSide);
+        LU.x = clamp(LU.x, 0, texSide);
+        LU.y = clamp(LU.y, 0, texSide);
+        RD.x = clamp(RD.x, 0, texSide);
+        RD.y = clamp(RD.y, 0, texSide);
+
+        const Eigen::Matrix3d worldToTriangleMatrix = computeTriangleTransform(*mesh, triangleId, triPixs);
+        // const Point3d triangleNormal = me->computeTriangleNormal(triangleId);
+
+        // iterate over bounding box's pixels
+        for (int y = LU.y; y < RD.y; ++y)
+        {
+            for (int x = LU.x; x < RD.x; ++x)
+            {
+                Pixel pix(x, y);  // top-left corner of the pixel
+                Point2d barycCoords;
+
+                // test if the pixel is inside triangle
+                // and retrieve its barycentric coordinates
+                if (!isPixelInTriangle(triPixs, pix, barycCoords))
+                {
+                    continue;
+                }
+
+                // remap 'y' to image coordinates system (inverted Y axis)
+                const unsigned int y_ = (texParams.textureSide - 1) - y;
+                // 1D pixel index
+                unsigned int xyoffset = y_ * texParams.textureSide + x;
+                // get 3D coordinates
+                // Point3d pt3d = barycentricToCartesian(triPts, Point2d(barycCoords.z, barycCoords.y));
+                Point3d pt3d = barycentricToCartesian(triPts, barycCoords);
+                GEO::vec3 q(pt3d.x, pt3d.y, pt3d.z);
+
+                // Texel normal (weighted normal from the 3 vertices normals), instead of face normal for better
+                // transitions (reduce seams)
+                const GEO::vec3 triangleNormal_p = mesh_facet_interpolate_normal_at_point(sparseMesh, triangleId, q);
+                // const GEO::vec3 triangleNormal_p = GEO::vec3(triangleNormal.m); // to use the triangle normal instead
+                const GEO::vec3 scaledTriangleNormal = triangleNormal_p * minEdgeLength * 10;
+
+                const double epsilon = 0.00001;
+                GEO::vec3 qA1 = q - (scaledTriangleNormal * epsilon);
+                GEO::vec3 qB1 = q + scaledTriangleNormal;
+                double t = 0.0;
+                GEO::index_t f = 0.0;
+                bool intersection = denseMeshAABB.segment_nearest_intersection(qA1, qB1, t, f);
+                if (intersection)
+                {
+                    computeNormalHeight(
+                      *denseMeshAABB.mesh(), 1.0, t, f, worldToTriangleMatrix, q, qA1, qB1, heightMap(xyoffset), normalMap(xyoffset));
+                }
+                else
+                {
+                    GEO::vec3 qA2 = q + (scaledTriangleNormal * epsilon);
+                    GEO::vec3 qB2 = q - scaledTriangleNormal;
+                    bool intersection = denseMeshAABB.segment_nearest_intersection(qA2, qB2, t, f);
+                    if (intersection)
+                    {
+                        computeNormalHeight(
+                          *denseMeshAABB.mesh(), -1.0, t, f, worldToTriangleMatrix, q, qA2, qB2, heightMap(xyoffset), normalMap(xyoffset));
+                    }
+                    else
+                    {
+                        heightMap(xyoffset) = 0.0f;
+                        normalMap(xyoffset) = image::RGBfColor(0.0f, 0.0f, 0.0f);
+                    }
+                }
+            }
+        }
+    }
+
+    // Save Normal Map
+    if (bumpMappingParams.bumpType == EBumpMappingType::Normal && bumpMappingParams.bumpMappingFileType != image::EImageFileType::NONE)
+    {
+        unsigned int outTextureSide = texParams.textureSide;
+        // downscale texture if required
+        if (texParams.downscale > 1)
+        {
+            ALICEVISION_LOG_INFO("Downscaling normal map (" << texParams.downscale << "x).");
+            image::Image<image::RGBfColor> resizedBuffer;
+            outTextureSide = texParams.textureSide / texParams.downscale;
+            // use nearest-neighbor interpolation to avoid meaningless interpolation of normals on edges.
+            const std::string interpolation = "box";
+            imageAlgo::resizeImage(texParams.downscale, normalMap, resizedBuffer, interpolation);
+
+            std::swap(resizedBuffer, normalMap);
+        }
+
+        // X: -1 to +1 : Red : 0 to 255
+        // Y: -1 to +1 : Green : 0 to 255
+        // Z: 0 to -1 : Blue : 128 to 255 OR 0 to 255 (like Blender)
+        for (unsigned int i = 0; i < normalMap.size(); ++i)
+            // normalMap(i) = image::RGBfColor(normalMap[i].r * 0.5 + 0.5,
+            //                                 normalMap[i].g * 0.5 + 0.5,
+            //                                 normalMap[i].b); // B:
+            // 0:+1 => 0-255
+            normalMap(i) = image::RGBfColor(normalMap(i).r() * 0.5 + 0.5,
+                                            normalMap(i).g() * 0.5 + 0.5,
+                                            normalMap(i).b() * 0.5 + 0.5);  // B: -1:+1 => 0-255 which means 0:+1 => 128-255
+
+        material.normalType = bumpMappingParams.bumpMappingFileType;
+        const std::string name = material.textureName(Material::TextureType::NORMAL, static_cast<int>(atlasID));
+        material.addTexture(Material::TextureType::NORMAL, name);
+
+        fs::path normalMapPath = outPath / name;
+        ALICEVISION_LOG_INFO("Writing normal map: " << normalMapPath.string());
+
+        image::writeImage(normalMapPath.string(),
+                          normalMap,
+                          image::ImageWriteOptions()
+                            .fromColorSpace(image::EImageColorSpace::NO_CONVERSION)
+                            .toColorSpace(image::EImageColorSpace::NO_CONVERSION)
+                            .storageDataType(image::EStorageDataType::Half));
+    }
+
+    // Save Height Maps
+    if (bumpMappingParams.bumpMappingFileType != image::EImageFileType::NONE || bumpMappingParams.displacementFileType != image::EImageFileType::NONE)
+    {
+        unsigned int outTextureSide = texParams.textureSide;
+        if (texParams.downscale > 1)
+        {
+            ALICEVISION_LOG_INFO("Downscaling height map (" << texParams.downscale << "x).");
+            image::Image<float> resizedBuffer;
+            outTextureSide = texParams.textureSide / texParams.downscale;
+            imageAlgo::resizeImage(texParams.downscale, heightMap, resizedBuffer);
+            std::swap(resizedBuffer, heightMap);
+        }
+
+        // Height maps are only in .EXR at this time, so this will never be executed.
+        //
+        // if(bumpMappingParams.bumpMappingFileType != image::EImageFileType::EXR)
+        //{
+        //    // Y: [-1, 0, +1] => [0, 128, 255]
+        //    for(unsigned int i = 0; i < heightMap.size(); ++i)
+        //        heightMap(i) = heightMap(i) * 0.5 + 0.5;
+        //}
+
+        // Save Bump Map
+        if (bumpMappingParams.bumpType == EBumpMappingType::Height)
+        {
+            material.bumpType = bumpMappingParams.bumpMappingFileType;
+            const std::string bumpName = material.textureName(Material::TextureType::BUMP, static_cast<int>(atlasID));
+            material.addTexture(Material::TextureType::BUMP, bumpName);
+
+            fs::path bumpMapPath = outPath / bumpName;
+            ALICEVISION_LOG_INFO("Writing bump map: " << bumpMapPath);
+
+            image::writeImage(bumpMapPath.string(), heightMap, image::ImageWriteOptions().storageDataType(image::EStorageDataType::Half));
+        }
+        // Save Displacement Map
+        if (bumpMappingParams.displacementFileType != image::EImageFileType::NONE)
+        {
+            material.displacementType = bumpMappingParams.displacementFileType;
+            const std::string dispName = material.textureName(Material::TextureType::DISPLACEMENT, static_cast<int>(atlasID));
+            material.addTexture(Material::TextureType::DISPLACEMENT, dispName);
+
+            fs::path dispMapPath = outPath / dispName;
+            ALICEVISION_LOG_INFO("Writing displacement map: " << dispMapPath);
+
+            image::writeImage(dispMapPath.string(), heightMap, image::ImageWriteOptions().storageDataType(image::EStorageDataType::Half));
+        }
+    }
+}
+
+}  // namespace mesh
+}  // namespace aliceVision

@@ -10,6 +10,7 @@
 #include <aliceVision/mvsData/Point2d.hpp>
 #include <aliceVision/mvsData/Point3d.hpp>
 #include <aliceVision/mvsData/Pixel.hpp>
+#include <aliceVision/mvsData/ROI.hpp>
 #include <aliceVision/mvsData/StaticVector.hpp>
 #include <aliceVision/mvsData/structures.hpp>
 
@@ -25,11 +26,12 @@ namespace bpt = boost::property_tree;
 
 namespace sfmData {
 class SfMData;
-} // namespace sfmData
+}  // namespace sfmData
 
 namespace mvsUtils {
 
-enum class EFileType {
+enum class EFileType
+{
     P = 0,
     K = 1,
     iK = 2,
@@ -61,18 +63,29 @@ enum class EFileType {
     diskSizeMap = 33,
     imgT = 34,
     depthMap = 35,
-    simMap = 36,
-    mapPtsTmp = 37,
-    camMap = 39,
-    mapPtsSimsTmp = 40,
-    nmodMap = 41,
-    D = 42,
-    normalMap = 43,
+    depthMapFiltered = 36,
+    simMap = 37,
+    simMapFiltered = 38,
+    normalMap = 39,
+    normalMapFiltered = 40,
+    thicknessMap = 41,
+    pixSizeMap = 42,
+    mapPtsTmp = 43,
+    camMap = 44,
+    mapPtsSimsTmp = 45,
+    nmodMap = 46,
+    D = 47,
+    volume = 48,
+    volumeCross = 49,
+    volumeTopographicCut = 50,
+    stats9p = 51,
+    tilePattern = 52,
+    none = 9999
 };
 
 class MultiViewParams
 {
-public:
+  public:
     /// prepareDenseScene data
     std::string _imagesFolder;
     /// camera projection matrix P
@@ -104,9 +117,8 @@ public:
                     const std::string& imagesFolder = "",
                     const std::string& depthMapsFolder = "",
                     const std::string& depthMapsFilterFolder = "",
-                    bool readFromDepthMaps = false,
-                    int downscale = 1,
-                    StaticVector<CameraMatrices>* cameras = nullptr);
+                    mvsUtils::EFileType fileType = mvsUtils::EFileType::none,
+                    int downscale = 1);
 
     ~MultiViewParams();
 
@@ -115,103 +127,53 @@ public:
         const Point3d p = CArr[camIndex] + (iCamArr[camIndex] * pix).normalize() * depth;
         return p;
     }
-    inline const std::string& getImagePath(int index) const
-    {
-        return _imagesParams.at(index).path;
-    }
+    inline const std::string& getImagePath(int index) const { return _imagesParams.at(index).path; }
 
-    inline int getViewId(int index) const
-    {
-        return _imagesParams.at(index).viewId;
-    }
+    inline int getViewId(int index) const { return _imagesParams.at(index).viewId; }
 
-    inline int getOriginalWidth(int index) const
-    {
-        return _imagesParams.at(index).width;
-    }
+    inline int getOriginalWidth(int index) const { return _imagesParams.at(index).width; }
 
-    inline int getOriginalHeight(int index) const
-    {
-        return _imagesParams.at(index).height;
-    }
+    inline int getOriginalHeight(int index) const { return _imagesParams.at(index).height; }
 
-    inline int getOriginalSize(int index) const
-    {
-        return _imagesParams.at(index).size;
-    }
+    inline int getOriginalSize(int index) const { return _imagesParams.at(index).size; }
 
-    inline int getWidth(int index) const
-    {
-        return _imagesParams.at(index).width / getDownscaleFactor(index);
-    }
+    inline int getWidth(int index) const { return _imagesParams.at(index).width / getDownscaleFactor(index); }
 
-    inline int getHeight(int index) const
-    {
-        return _imagesParams.at(index).height / getDownscaleFactor(index);
-    }
+    inline int getHeight(int index) const { return _imagesParams.at(index).height / getDownscaleFactor(index); }
 
-    inline int getSize(int index) const
-    {
-        return _imagesParams.at(index).size / getDownscaleFactor(index);
-    }
+    inline int getSize(int index) const { return _imagesParams.at(index).size / getDownscaleFactor(index); }
 
-    inline const std::vector<ImageParams>& getImagesParams() const
-    {
-        return _imagesParams;
-    }
+    inline const std::vector<ImageParams>& getImagesParams() const { return _imagesParams; }
 
-    inline const ImageParams& getImageParams(int i) const
-    {
-        return _imagesParams.at(i);
-    }
+    inline const ImageParams& getImageParams(int i) const { return _imagesParams.at(i); }
 
-    inline int getDownscaleFactor(int index) const
-    {
-        return _imagesScale.at(index) * _processDownscale;
-    }
+    inline int getDownscaleFactor(int index) const { return _imagesScale.at(index) * _processDownscale; }
 
-    inline int getProcessDownscale() const
-    {
-        return _processDownscale;
-    }
+    inline int getProcessDownscale() const { return _processDownscale; }
 
-    inline int getMaxImageWidth() const
-    {
-        return _maxImageWidth;
-    }
+    inline int getMaxImageOriginalWidth() const { return _maxImageWidth; }
 
-    inline int getMaxImageHeight() const
-    {
-        return _maxImageHeight;
-    }
+    inline int getMaxImageOriginalHeight() const { return _maxImageHeight; }
 
-    inline int getNbCameras() const
-    {
-        return _imagesParams.size();
-    }
+    inline int getMaxImageWidth() const { return _maxImageWidth / getProcessDownscale(); }
 
-    inline int getIndexFromViewId(IndexT viewId) const
-    {
-        return _imageIdsPerViewId.at(viewId);
-    }
+    inline int getMaxImageHeight() const { return _maxImageHeight / getProcessDownscale(); }
 
-    inline float getMinViewAngle() const
-    {
-        return _minViewAngle;
-    }
+    inline int getNbCameras() const { return _imagesParams.size(); }
 
-    inline float getMaxViewAngle() const
-    {
-        return _maxViewAngle;
-    }
+    inline int getIndexFromViewId(IndexT viewId) const { return _imageIdsPerViewId.at(viewId); }
+
+    inline float getMinViewAngle() const { return _minViewAngle; }
+
+    inline float getMaxViewAngle() const { return _maxViewAngle; }
 
     inline std::vector<double> getOriginalP(int index) const
     {
-        std::vector<double> p44; // projection matrix (4x4) scale 1
-        const Matrix3x4& p34 = camArr.at(index); // projection matrix (3x4) scale = getDownscaleFactor()
+        std::vector<double> p44;                  // projection matrix (4x4) scale 1
+        const Matrix3x4& p34 = camArr.at(index);  // projection matrix (3x4) scale = getDownscaleFactor()
         const int downscale = getDownscaleFactor(index);
         p44.assign(p34.m, p34.m + 12);
-        std::transform(p44.begin(), p44.begin() + 8, p44.begin(), std::bind1st(std::multiplies<double>(),downscale));
+        std::transform(p44.begin(), p44.begin() + 8, p44.begin(), [&](double p) { return p * downscale; });
         p44.push_back(0);
         p44.push_back(0);
         p44.push_back(0);
@@ -219,26 +181,16 @@ public:
         return p44;
     }
 
-    inline const std::string& getDepthMapsFolder() const
-    {
-        return _depthMapsFolder;
-    }
+    inline const std::string& getDepthMapsFolder() const { return _depthMapsFolder; }
 
-    inline const std::string& getDepthMapsFilterFolder() const
-    {
-        return _depthMapsFilterFolder;
-    }
+    inline const std::string& getDepthMapsFilterFolder() const { return _depthMapsFilterFolder; }
 
-    inline const sfmData::SfMData& getInputSfMData() const
-    {
-        return _sfmData;
-    }
+    inline const sfmData::SfMData& getInputSfMData() const { return _sfmData; }
 
     const std::map<std::string, std::string>& getMetadata(int index) const;
 
     bool is3DPointInFrontOfCam(const Point3d* X, int rc) const;
 
-    void getMinMaxMidNbDepth(int index, float& min, float& max, float& mid, std::size_t& nbDepths, float percentile = 0.999f) const;
     void getPixelFor3DPoint(Point2d* out, const Point3d& X, const Matrix3x4& P) const;
     void getPixelFor3DPoint(Point2d* out, const Point3d& X, int rc) const;
     void getPixelFor3DPoint(Pixel* out, const Point3d& X, int rc) const;
@@ -249,12 +201,15 @@ public:
     double getCamPixelSizePlaneSweepAlpha(const Point3d& p, int rc, StaticVector<int>* tcams, int scale, int step) const;
 
     double getCamsMinPixelSize(const Point3d& x0, std::vector<unsigned short>* tcams) const;
-    double getCamsMinPixelSize(const Point3d& x0, StaticVector<int>& tcams) const;
+    double getCamsMinPixelSize(const Point3d& x0, const StaticVector<int>& tcams) const;
 
-    bool isPixelInImage(const Pixel& pix, int d, int camId) const;
+    bool isPixelInSourceImage(const Pixel& pixRC, int camId, int margin) const;
+    bool isPixelInImage(const Pixel& pix, int camId, int margin) const;
     bool isPixelInImage(const Pixel& pix, int camId) const;
     bool isPixelInImage(const Point2d& pix, int camId) const;
-    void decomposeProjectionMatrix(Point3d& Co, Matrix3x3& Ro, Matrix3x3& iRo, Matrix3x3& Ko, Matrix3x3& iKo, Matrix3x3& iPo, const Matrix3x4& P) const;
+    bool isPixelInImage(const Point2d& pix, int camId, int margin) const;
+    void decomposeProjectionMatrix(Point3d& Co, Matrix3x3& Ro, Matrix3x3& iRo, Matrix3x3& Ko, Matrix3x3& iKo, Matrix3x3& iPo, const Matrix3x4& P)
+      const;
 
     /**
      * @brief findCamsWhichIntersectsHexahedron
@@ -279,18 +234,21 @@ public:
      */
     StaticVector<int> findNearestCamsFromLandmarks(int rc, int nbNearestCams) const;
 
+    /**
+     * @brief Find nearest cameras for a given tile
+     * @param[in] rc R camera id
+     * @param[in] nbNearestCams maximum number of desired nearest cameras
+     * @param[in] tCams a given list of preselected nearest cameras
+     * @param[in] roi the tile 2d region of interest
+     * @return nearest cameras list for the given tile
+     */
+    std::vector<int> findTileNearestCams(int rc, int nbNearestCams, const std::vector<int>& tCams, const ROI& roi) const;
 
-    inline void setMinViewAngle(float minViewAngle)
-    {
-      _minViewAngle = minViewAngle;
-    }
+    inline void setMinViewAngle(float minViewAngle) { _minViewAngle = minViewAngle; }
 
-    inline void setMaxViewAngle(float maxViewAngle)
-    {
-      _maxViewAngle = maxViewAngle;
-    }
+    inline void setMaxViewAngle(float maxViewAngle) { _maxViewAngle = maxViewAngle; }
 
-private:
+  private:
     /// image params list (width, height, size)
     std::vector<ImageParams> _imagesParams;
     /// image id per view id
@@ -331,9 +289,9 @@ private:
         CArr.resize(ncams);
         iCamArr.resize(ncams);
         FocK1K2Arr.resize(ncams);
-        _imagesScale.resize(ncams);
+        _imagesScale.resize(ncams, 1);
     }
 };
 
-} // namespace mvsUtils
-} // namespace aliceVision
+}  // namespace mvsUtils
+}  // namespace aliceVision

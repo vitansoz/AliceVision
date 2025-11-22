@@ -10,10 +10,10 @@
 
 namespace aliceVision {
 
-int getArrayLengthFromFile(std::string fileName)
+int getArrayLengthFromFile(const std::string& fileName)
 {
     FILE* f = fopen(fileName.c_str(), "rb");
-    if(f == nullptr)
+    if (f == nullptr)
     {
         // printf("WARNING: file %s does not exists!\n", fileName.c_str());
         return 0;
@@ -21,14 +21,14 @@ int getArrayLengthFromFile(std::string fileName)
 
     int n = 0;
     size_t retval = fread(&n, sizeof(int), 1, f);
-    if( retval != sizeof(int) )
+    if (retval != sizeof(int))
     {
         ALICEVISION_LOG_WARNING("[IO] getArrayLengthFromFile: can't read array length (1)");
     }
-    if(n == -1)
+    if (n == -1)
     {
         retval = fread(&n, sizeof(int), 1, f);
-        if( retval != sizeof(int) )
+        if (retval != sizeof(int))
         {
             ALICEVISION_LOG_WARNING("[IO] getArrayLengthFromFile: can't read array length (2)");
         }
@@ -37,4 +37,4 @@ int getArrayLengthFromFile(std::string fileName)
     return n;
 }
 
-} // namespace aliceVision
+}  // namespace aliceVision

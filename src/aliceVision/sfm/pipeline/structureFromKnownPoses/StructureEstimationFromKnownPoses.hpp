@@ -9,48 +9,40 @@
 
 #include <aliceVision/sfmData/SfMData.hpp>
 #include <aliceVision/feature/RegionsPerView.hpp>
-#include <aliceVision/matching/IndMatch.hpp>
+#include <aliceVision/matching/MatchesCollections.hpp>
 
 namespace aliceVision {
 namespace sfm {
 
 class StructureEstimationFromKnownPoses
 {
-public:
+  public:
+    /// Use geometry of the views to compute a putative structure from features and descriptors.
+    void run(sfmData::SfMData& sfmData,
+             const PairSet& pairs,
+             const feature::RegionsPerView& regionsPerView,
+             std::mt19937& randomNumberGenerator,
+             double geometricErrorMax);
 
-  /// Use geometry of the views to compute a putative structure from features and descriptors.
-  void run(
-    sfmData::SfMData& sfmData,
-    const PairSet& pairs,
-    const feature::RegionsPerView& regionsPerView);
+  public:
+    /// Use guided matching to find corresponding 2-view correspondences
+    void match(const sfmData::SfMData& sfmData, const PairSet& pairs, const feature::RegionsPerView& regionsPerView, double geometricErrorMax);
 
-public:
+    /// Filter inconsistent correspondences by using 3-view correspondences on view triplets
+    void filter(const sfmData::SfMData& sfmData, const PairSet& pairs, const feature::RegionsPerView& regionsPerView);
 
-  /// Use guided matching to find corresponding 2-view correspondences
-  void match(
-    const sfmData::SfMData& sfmData,
-    const PairSet& pairs,
-    const feature::RegionsPerView& regionsPerView);
+    /// Init & triangulate landmark observations from validated 3-view correspondences
+    void triangulate(sfmData::SfMData& sfmData, const feature::RegionsPerView& regionsPerView, std::mt19937& randomNumberGenerator);
 
-  /// Filter inconsistent correspondences by using 3-view correspondences on view triplets
-  void filter(
-    const sfmData::SfMData& sfmData,
-    const PairSet& pairs,
-    const feature::RegionsPerView& regionsPerView);
+    const matching::PairwiseMatches& getPutativesMatches() const { return _putativeMatches; }
 
-  /// Init & triangulate landmark observations from validated 3-view correspondences
-  void triangulate(
-    sfmData::SfMData& sfmData,
-    const feature::RegionsPerView& regionsPerView);
-
-private:
-  //--
-  // DATA (temporary)
-  //--
-  matching::PairwiseMatches _putativeMatches;
-  matching::PairwiseMatches _tripletMatches;
+  private:
+    //--
+    // DATA (temporary)
+    //--
+    matching::PairwiseMatches _putativeMatches;
+    matching::PairwiseMatches _tripletMatches;
 };
 
-} // namespace sfm
-} // namespace aliceVision
-
+}  // namespace sfm
+}  // namespace aliceVision

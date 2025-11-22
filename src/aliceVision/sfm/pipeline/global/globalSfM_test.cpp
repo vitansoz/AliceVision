@@ -8,26 +8,23 @@
 #include <aliceVision/sfm/utils/statistics.hpp>
 #include <aliceVision/sfm/utils/syntheticScene.hpp>
 #include <aliceVision/feature/FeaturesPerView.hpp>
-#include <aliceVision/matching/IndMatch.hpp>
+#include <aliceVision/matching/MatchesCollections.hpp>
 #include <aliceVision/sfm/sfm.hpp>
-
-#include <boost/filesystem.hpp>
 
 #include <cmath>
 #include <cstdio>
 #include <iostream>
 
 #define BOOST_TEST_MODULE GLOBAL_SFM
-#include <boost/test/included/unit_test.hpp>
-#include <boost/test/floating_point_comparison.hpp>
+
+#include <boost/test/unit_test.hpp>
+#include <boost/test/tools/floating_point_comparison.hpp>
 
 using namespace aliceVision;
 using namespace aliceVision::camera;
 using namespace aliceVision::geometry;
 using namespace aliceVision::sfm;
 using namespace aliceVision::sfmData;
-
-namespace fs = boost::filesystem;
 
 // Test summary:
 // - Create features points and matching from the synthetic dataset
@@ -39,200 +36,196 @@ namespace fs = boost::filesystem;
 //   - the desired number of poses are found.
 BOOST_AUTO_TEST_CASE(GLOBAL_SFM_RotationAveragingL2_TranslationAveragingL1)
 {
-  const int nviews = 6;
-  const int npoints = 64;
-  const NViewDatasetConfigurator config;
-  const NViewDataSet d = NRealisticCamerasRing(nviews, npoints, config);
+    makeRandomOperationsReproducible();
 
-  // Translate the input dataset to a SfMData scene
-  const SfMData sfmData = getInputScene(d, config, PINHOLE_CAMERA);
+    const int nviews = 6;
+    const int npoints = 64;
+    const NViewDatasetConfigurator config;
+    const NViewDataSet d = NRealisticCamerasRing(nviews, npoints, config);
 
-  // Remove poses and structure
-  SfMData sfmData2 = sfmData;
-  sfmData2.getPoses().clear();
-  sfmData2.structure.clear();
+    // Translate the input dataset to a SfMData scene
+    const SfMData sfmData = getInputScene(d, config, EINTRINSIC::PINHOLE_CAMERA, EDISTORTION::DISTORTION_NONE);
 
-  ReconstructionEngine_globalSfM sfmEngine(
-    sfmData2,
-    "./",
-    "./Reconstruction_Report.html");
+    // Remove poses and structure
+    SfMData sfmData2 = sfmData;
+    sfmData2.getPoses().clear();
+    sfmData2.getLandmarks().clear();
 
-  // Add a tiny noise in 2D observations to make data more realistic
-  std::normal_distribution<double> distribution(0.0,0.5);
+    ReconstructionEngine_globalSfM sfmEngine(sfmData2, "./", "./Reconstruction_Report.html");
 
-  // Configure the featuresPerView & the matches_provider from the synthetic dataset
-  feature::FeaturesPerView featuresPerView;
-  generateSyntheticFeatures(featuresPerView, feature::EImageDescriberType::UNKNOWN, sfmData, distribution);
+    // Add a tiny noise in 2D observations to make data more realistic
+    std::normal_distribution<double> distribution(0.0, 0.5);
 
-  matching::PairwiseMatches pairwiseMatches;
-  generateSyntheticMatches(pairwiseMatches, sfmData, feature::EImageDescriberType::UNKNOWN);
+    // Configure the featuresPerView & the matches_provider from the synthetic dataset
+    feature::FeaturesPerView featuresPerView;
+    generateSyntheticFeatures(featuresPerView, feature::EImageDescriberType::UNKNOWN, sfmData, distribution);
 
-  // Configure data provider (Features and Matches)
-  sfmEngine.SetFeaturesProvider(&featuresPerView);
-  sfmEngine.SetMatchesProvider(&pairwiseMatches);
+    matching::PairwiseMatches pairwiseMatches;
+    generateSyntheticMatches(pairwiseMatches, sfmData, feature::EImageDescriberType::UNKNOWN);
 
-  // Configure reconstruction parameters
-  sfmEngine.setLockAllIntrinsics(true);
+    // Configure data provider (Features and Matches)
+    sfmEngine.setFeaturesProvider(&featuresPerView);
+    sfmEngine.setMatchesProvider(&pairwiseMatches);
 
-  // Configure motion averaging method
-  sfmEngine.SetRotationAveragingMethod(ROTATION_AVERAGING_L2);
-  sfmEngine.SetTranslationAveragingMethod(TRANSLATION_AVERAGING_L1);
+    // Configure reconstruction parameters
+    sfmEngine.setLockAllIntrinsics(true);
 
-  BOOST_CHECK (sfmEngine.process());
+    // Configure motion averaging method
+    sfmEngine.setRotationAveragingMethod(ROTATION_AVERAGING_L2);
+    sfmEngine.setTranslationAveragingMethod(TRANSLATION_AVERAGING_L1);
 
-  const double residual = RMSE(sfmEngine.getSfMData());
-  ALICEVISION_LOG_DEBUG("RMSE residual: " << residual);
-  BOOST_CHECK(residual < 0.5);
-  BOOST_CHECK(sfmEngine.getSfMData().getPoses().size() == nviews);
-  BOOST_CHECK(sfmEngine.getSfMData().getLandmarks().size() == npoints);
+    BOOST_CHECK(sfmEngine.process());
+
+    const double residual = RMSE(sfmEngine.getSfMData());
+    ALICEVISION_LOG_DEBUG("RMSE residual: " << residual);
+    BOOST_CHECK(residual < 0.5);
+    BOOST_CHECK(sfmEngine.getSfMData().getPoses().size() == nviews);
+    BOOST_CHECK(sfmEngine.getSfMData().getLandmarks().size() == npoints);
 }
 
 BOOST_AUTO_TEST_CASE(GLOBAL_SFM_RotationAveragingL1_TranslationAveragingL1)
 {
-  const int nviews = 6;
-  const int npoints = 64;
-  const NViewDatasetConfigurator config;
-  const NViewDataSet d = NRealisticCamerasRing(nviews, npoints, config);
+    makeRandomOperationsReproducible();
 
-  // Translate the input dataset to a SfMData scene
-  const SfMData sfmData = getInputScene(d, config, PINHOLE_CAMERA);
+    const int nviews = 6;
+    const int npoints = 64;
+    const NViewDatasetConfigurator config;
+    const NViewDataSet d = NRealisticCamerasRing(nviews, npoints, config);
 
-  // Remove poses and structure
-  SfMData sfmData2 = sfmData;
-  sfmData2.getPoses().clear();
-  sfmData2.structure.clear();
+    // Translate the input dataset to a SfMData scene
+    const SfMData sfmData = getInputScene(d, config, EINTRINSIC::PINHOLE_CAMERA, EDISTORTION::DISTORTION_NONE);
 
-  ReconstructionEngine_globalSfM sfmEngine(
-    sfmData2,
-    "./",
-    "./Reconstruction_Report.html");
+    // Remove poses and structure
+    SfMData sfmData2 = sfmData;
+    sfmData2.getPoses().clear();
+    sfmData2.getLandmarks().clear();
 
-  // Add a tiny noise in 2D observations to make data more realistic
-  std::normal_distribution<double> distribution(0.0,0.5);
+    ReconstructionEngine_globalSfM sfmEngine(sfmData2, "./", "./Reconstruction_Report.html");
 
-  // Configure the featuresPerView & the matches_provider from the synthetic dataset
-  feature::FeaturesPerView featuresPerView;
-  generateSyntheticFeatures(featuresPerView, feature::EImageDescriberType::UNKNOWN, sfmData, distribution);
+    // Add a tiny noise in 2D observations to make data more realistic
+    std::normal_distribution<double> distribution(0.0, 0.5);
 
-  matching::PairwiseMatches pairwiseMatches;
-  generateSyntheticMatches(pairwiseMatches, sfmData, feature::EImageDescriberType::UNKNOWN);
+    // Configure the featuresPerView & the matches_provider from the synthetic dataset
+    feature::FeaturesPerView featuresPerView;
+    generateSyntheticFeatures(featuresPerView, feature::EImageDescriberType::UNKNOWN, sfmData, distribution);
 
-  // Configure data provider (Features and Matches)
-  sfmEngine.SetFeaturesProvider(&featuresPerView);
-  sfmEngine.SetMatchesProvider(&pairwiseMatches);
+    matching::PairwiseMatches pairwiseMatches;
+    generateSyntheticMatches(pairwiseMatches, sfmData, feature::EImageDescriberType::UNKNOWN);
 
-  // Configure reconstruction parameters
-  sfmEngine.setLockAllIntrinsics(true);
+    // Configure data provider (Features and Matches)
+    sfmEngine.setFeaturesProvider(&featuresPerView);
+    sfmEngine.setMatchesProvider(&pairwiseMatches);
 
-  // Configure motion averaging method
-  sfmEngine.SetRotationAveragingMethod(ROTATION_AVERAGING_L1);
-  sfmEngine.SetTranslationAveragingMethod(TRANSLATION_AVERAGING_L1);
+    // Configure reconstruction parameters
+    sfmEngine.setLockAllIntrinsics(true);
 
-  BOOST_CHECK (sfmEngine.process());
+    // Configure motion averaging method
+    sfmEngine.setRotationAveragingMethod(ROTATION_AVERAGING_L1);
+    sfmEngine.setTranslationAveragingMethod(TRANSLATION_AVERAGING_L1);
 
-  const double residual = RMSE(sfmEngine.getSfMData());
-  ALICEVISION_LOG_DEBUG("RMSE residual: " << residual);
-  BOOST_CHECK(residual < 0.5);
-  BOOST_CHECK(sfmEngine.getSfMData().getPoses().size() == nviews);
-  BOOST_CHECK(sfmEngine.getSfMData().getLandmarks().size() == npoints);
+    BOOST_CHECK(sfmEngine.process());
+
+    const double residual = RMSE(sfmEngine.getSfMData());
+    ALICEVISION_LOG_DEBUG("RMSE residual: " << residual);
+    BOOST_CHECK(residual < 0.5);
+    BOOST_CHECK(sfmEngine.getSfMData().getPoses().size() == nviews);
+    BOOST_CHECK(sfmEngine.getSfMData().getLandmarks().size() == npoints);
 }
 
 BOOST_AUTO_TEST_CASE(GLOBAL_SFM_RotationAveragingL2_TranslationAveragingL2_Chordal)
 {
-  const int nviews = 6;
-  const int npoints = 64;
-  const NViewDatasetConfigurator config;
-  const NViewDataSet d = NRealisticCamerasRing(nviews, npoints, config);
+    makeRandomOperationsReproducible();
 
-  // Translate the input dataset to a SfMData scene
-  const SfMData sfmData = getInputScene(d, config, PINHOLE_CAMERA);
+    const int nviews = 6;
+    const int npoints = 64;
+    const NViewDatasetConfigurator config;
+    const NViewDataSet d = NRealisticCamerasRing(nviews, npoints, config);
 
-  // Remove poses and structure
-  SfMData sfmData2 = sfmData;
-  sfmData2.getPoses().clear();
-  sfmData2.structure.clear();
+    // Translate the input dataset to a SfMData scene
+    const SfMData sfmData = getInputScene(d, config, EINTRINSIC::PINHOLE_CAMERA, EDISTORTION::DISTORTION_NONE);
 
-  ReconstructionEngine_globalSfM sfmEngine(
-    sfmData2,
-    "./",
-    "./Reconstruction_Report.html");
+    // Remove poses and structure
+    SfMData sfmData2 = sfmData;
+    sfmData2.getPoses().clear();
+    sfmData2.getLandmarks().clear();
 
-  // Add a tiny noise in 2D observations to make data more realistic
-  std::normal_distribution<double> distribution(0.0,0.5);
+    ReconstructionEngine_globalSfM sfmEngine(sfmData2, "./", "./Reconstruction_Report.html");
 
-  // Configure the featuresPerView & the matches_provider from the synthetic dataset
-  feature::FeaturesPerView featuresPerView;
-  generateSyntheticFeatures(featuresPerView, feature::EImageDescriberType::UNKNOWN, sfmData, distribution);
+    // Add a tiny noise in 2D observations to make data more realistic
+    std::normal_distribution<double> distribution(0.0, 0.5);
 
-  matching::PairwiseMatches pairwiseMatches;
-  generateSyntheticMatches(pairwiseMatches, sfmData, feature::EImageDescriberType::UNKNOWN);
+    // Configure the featuresPerView & the matches_provider from the synthetic dataset
+    feature::FeaturesPerView featuresPerView;
+    generateSyntheticFeatures(featuresPerView, feature::EImageDescriberType::UNKNOWN, sfmData, distribution);
 
-  // Configure data provider (Features and Matches)
-  sfmEngine.SetFeaturesProvider(&featuresPerView);
-  sfmEngine.SetMatchesProvider(&pairwiseMatches);
+    matching::PairwiseMatches pairwiseMatches;
+    generateSyntheticMatches(pairwiseMatches, sfmData, feature::EImageDescriberType::UNKNOWN);
 
-  // Configure reconstruction parameters
-  sfmEngine.setLockAllIntrinsics(true);
+    // Configure data provider (Features and Matches)
+    sfmEngine.setFeaturesProvider(&featuresPerView);
+    sfmEngine.setMatchesProvider(&pairwiseMatches);
 
-  // Configure motion averaging method
-  sfmEngine.SetRotationAveragingMethod(ROTATION_AVERAGING_L2);
-  sfmEngine.SetTranslationAveragingMethod(TRANSLATION_AVERAGING_L2_DISTANCE_CHORDAL);
+    // Configure reconstruction parameters
+    sfmEngine.setLockAllIntrinsics(true);
 
-  BOOST_CHECK (sfmEngine.process());
+    // Configure motion averaging method
+    sfmEngine.setRotationAveragingMethod(ROTATION_AVERAGING_L2);
+    sfmEngine.setTranslationAveragingMethod(TRANSLATION_AVERAGING_L2_DISTANCE_CHORDAL);
 
-  const double residual = RMSE(sfmEngine.getSfMData());
-  ALICEVISION_LOG_DEBUG("RMSE residual: " << residual);
-  BOOST_CHECK(residual < 0.5);
-  BOOST_CHECK(sfmEngine.getSfMData().getPoses().size() == nviews);
-  BOOST_CHECK(sfmEngine.getSfMData().getLandmarks().size() == npoints);
+    BOOST_CHECK(sfmEngine.process());
+
+    const double residual = RMSE(sfmEngine.getSfMData());
+    ALICEVISION_LOG_DEBUG("RMSE residual: " << residual);
+    BOOST_CHECK(residual < 0.5);
+    BOOST_CHECK(sfmEngine.getSfMData().getPoses().size() == nviews);
+    BOOST_CHECK(sfmEngine.getSfMData().getLandmarks().size() == npoints);
 }
 
 BOOST_AUTO_TEST_CASE(GLOBAL_SFM_RotationAveragingL2_TranslationAveragingSoftL1)
 {
-  const int nviews = 6;
-  const int npoints = 64;
-  const NViewDatasetConfigurator config;
-  const NViewDataSet d = NRealisticCamerasRing(nviews, npoints, config);
+    makeRandomOperationsReproducible();
 
-  // Translate the input dataset to a SfMData scene
-  const SfMData sfmData = getInputScene(d, config, PINHOLE_CAMERA);
+    const int nviews = 6;
+    const int npoints = 64;
+    const NViewDatasetConfigurator config;
+    const NViewDataSet d = NRealisticCamerasRing(nviews, npoints, config);
 
-  // Remove poses and structure
-  SfMData sfmData2 = sfmData;
-  sfmData2.getPoses().clear();
-  sfmData2.structure.clear();
+    // Translate the input dataset to a SfMData scene
+    const SfMData sfmData = getInputScene(d, config, EINTRINSIC::PINHOLE_CAMERA, EDISTORTION::DISTORTION_NONE);
 
-  ReconstructionEngine_globalSfM sfmEngine(
-    sfmData2,
-    "./",
-    "./Reconstruction_Report.html");
+    // Remove poses and structure
+    SfMData sfmData2 = sfmData;
+    sfmData2.getPoses().clear();
+    sfmData2.getLandmarks().clear();
 
-  // Add a tiny noise in 2D observations to make data more realistic
-  std::normal_distribution<double> distribution(0.0,0.5);
+    ReconstructionEngine_globalSfM sfmEngine(sfmData2, "./", "./Reconstruction_Report.html");
 
-  // Configure the featuresPerView & the matches_provider from the synthetic dataset
-  feature::FeaturesPerView featuresPerView;
-  generateSyntheticFeatures(featuresPerView, feature::EImageDescriberType::UNKNOWN, sfmData, distribution);
+    // Add a tiny noise in 2D observations to make data more realistic
+    std::normal_distribution<double> distribution(0.0, 0.5);
 
-  matching::PairwiseMatches pairwiseMatches;
-  generateSyntheticMatches(pairwiseMatches, sfmData, feature::EImageDescriberType::UNKNOWN);
+    // Configure the featuresPerView & the matches_provider from the synthetic dataset
+    feature::FeaturesPerView featuresPerView;
+    generateSyntheticFeatures(featuresPerView, feature::EImageDescriberType::UNKNOWN, sfmData, distribution);
 
-  // Configure data provider (Features and Matches)
-  sfmEngine.SetFeaturesProvider(&featuresPerView);
-  sfmEngine.SetMatchesProvider(&pairwiseMatches);
+    matching::PairwiseMatches pairwiseMatches;
+    generateSyntheticMatches(pairwiseMatches, sfmData, feature::EImageDescriberType::UNKNOWN);
 
-  // Configure reconstruction parameters
-  sfmEngine.setLockAllIntrinsics(true);
+    // Configure data provider (Features and Matches)
+    sfmEngine.setFeaturesProvider(&featuresPerView);
+    sfmEngine.setMatchesProvider(&pairwiseMatches);
 
-  // Configure motion averaging method
-  sfmEngine.SetRotationAveragingMethod(ROTATION_AVERAGING_L2);
-  sfmEngine.SetTranslationAveragingMethod(TRANSLATION_AVERAGING_SOFTL1);
+    // Configure reconstruction parameters
+    sfmEngine.setLockAllIntrinsics(true);
 
-  BOOST_CHECK (sfmEngine.process());
+    // Configure motion averaging method
+    sfmEngine.setRotationAveragingMethod(ROTATION_AVERAGING_L2);
+    sfmEngine.setTranslationAveragingMethod(TRANSLATION_AVERAGING_SOFTL1);
 
-  const double residual = RMSE(sfmEngine.getSfMData());
-  ALICEVISION_LOG_DEBUG("RMSE residual: " << residual);
-  BOOST_CHECK(residual < 0.5);
-  BOOST_CHECK(sfmEngine.getSfMData().getPoses().size() == nviews);
-  BOOST_CHECK(sfmEngine.getSfMData().getLandmarks().size() == npoints);
+    BOOST_CHECK(sfmEngine.process());
+
+    const double residual = RMSE(sfmEngine.getSfMData());
+    ALICEVISION_LOG_DEBUG("RMSE residual: " << residual);
+    BOOST_CHECK(residual < 0.5);
+    BOOST_CHECK(sfmEngine.getSfMData().getPoses().size() == nviews);
+    BOOST_CHECK(sfmEngine.getSfMData().getLandmarks().size() == npoints);
 }

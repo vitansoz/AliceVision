@@ -14,18 +14,18 @@ namespace system {
 
 struct MemoryInfo
 {
-    std::size_t totalRam;
-    std::size_t freeRam;
-    //	std::size_t sharedRam;
-    //	std::size_t bufferRam;
-    std::size_t totalSwap;
-    std::size_t freeSwap;
+    std::size_t totalRam{0};
+    std::size_t freeRam{0};
+    std::size_t availableRam{0};
+    //	std::size_t sharedRam{0};
+    //	std::size_t bufferRam{0};
+    std::size_t totalSwap{0};
+    std::size_t freeSwap{0};
 };
 
 MemoryInfo getMemoryInfo();
 
 std::ostream& operator<<(std::ostream& os, const MemoryInfo& infos);
 
-}
-}
-
+}  // namespace system
+}  // namespace aliceVision
